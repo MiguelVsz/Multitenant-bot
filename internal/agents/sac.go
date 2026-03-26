@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -35,25 +34,8 @@ type consoleSession struct {
 func RunConsoleChat() error {
 	_ = godotenv.Load()
 
-	store, err := newAgentSessionStoreFromEnv()
-	if err != nil {
-		return fmt.Errorf("redis session store: %w", err)
-	}
-
-	userID := strings.TrimSpace(os.Getenv("CONSOLE_USER_ID"))
-	if userID == "" {
-		userID = "console-user"
-	}
-
 	scanner := bufio.NewScanner(os.Stdin)
 	session := &consoleSession{}
-	if store != nil {
-		loaded, err := store.Load(context.Background(), userID)
-		if err != nil {
-			return fmt.Errorf("load console session: %w", err)
-		}
-		session = loaded
-	}
 
 	fmt.Println("Bot de pruebas iniciado.")
 	fmt.Println("Puedes escribir cosas como: menu, sedes, domicilio, recoger en tienda, ver mis pedidos, actualizar datos.")
@@ -72,20 +54,10 @@ func RunConsoleChat() error {
 
 		switch strings.ToLower(input) {
 		case "salir", "exit", "quit":
-			if store != nil {
-				if err := store.Save(context.Background(), userID, session); err != nil {
-					log.Printf("save console session: %v", err)
-				}
-			}
 			fmt.Println("Sesion finalizada.")
 			return nil
 		case "menu principal", "menu", "inicio", "reiniciar":
 			resetConsoleSession(session)
-			if store != nil {
-				if err := store.Save(context.Background(), userID, session); err != nil {
-					log.Printf("save console session: %v", err)
-				}
-			}
 			fmt.Println("Bot:")
 			fmt.Println("  Regresamos al menu principal.")
 			fmt.Println("  Puedes elegir domicilio, recoger en tienda, ver pedidos, actualizar datos, ver sedes o ver productos.")
@@ -93,11 +65,6 @@ func RunConsoleChat() error {
 		}
 
 		reply := handleConsoleInput(session, input)
-		if store != nil {
-			if err := store.Save(context.Background(), userID, session); err != nil {
-				log.Printf("save console session: %v", err)
-			}
-		}
 		fmt.Println("Bot:")
 		for _, line := range strings.Split(reply, "\n") {
 			fmt.Printf("  %s\n", line)

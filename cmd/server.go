@@ -41,7 +41,7 @@ func loadConfig() (*Config, error) {
 		LogLevel:          getEnv("LOG_LEVEL", "info"),
 		DatabaseURL:       mustEnv("DATABASE_URL"),
 		RedisURL:          mustEnv("REDIS_URL"),
-		GroqAPIKey:        mustEnv("GROQ_API_KEY"),
+		GroqAPIKey:        mustAnyEnv("GROQ_API_KEY", "AGENT_ROUTER_KEY", "AGENT_DELIVERY_KEY", "AGENT_SAC_KEY", "AGENT_ORDERVAL_KEY", "AGENT_PICKUP_KEY", "AGENT_UPDATE_DATA_KEY"),
 		MetaVerifyToken:   getEnv("META_VERIFY_TOKEN", defaultMetaVerifyToken),
 		MetaAppSecret:     getEnv("META_APP_SECRET", ""),
 		SessionTTLMinutes: getEnvInt("SESSION_TTL_MINUTES", 30),
@@ -242,6 +242,17 @@ func mustEnv(key string) string {
 		os.Exit(1)
 	}
 	return v
+}
+
+func mustAnyEnv(keys ...string) string {
+	for _, key := range keys {
+		if v := os.Getenv(key); v != "" {
+			return v
+		}
+	}
+	fmt.Fprintf(os.Stderr, "FATAL: one of these environment variables is required: %q\n", keys)
+	os.Exit(1)
+	return ""
 }
 
 func getEnv(key, fallback string) string {
