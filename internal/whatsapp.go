@@ -1,5 +1,14 @@
 package internal
 
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+)
+
 type CloudAPIWebhook struct {
 	Object string         `json:"object"`
 	Entry  []WebhookEntry `json:"entry"`
@@ -85,4 +94,51 @@ func ExtractIncomingMessages(payload *CloudAPIWebhook) []IncomingMessage {
 	}
 
 	return messages
+}
+
+type WhatsAppOutboundMessage struct {
+	MessagingProduct string `json:"messaging_product"`
+	To               string `json:"to"`
+	Type             string `json:"type"`
+	Text             struct {
+		Body       string `json:"body"`
+		PreviewUrl bool   `json:"preview_url"`
+	} `json:"text"`
+}
+
+func SendWhatsAppMessage(ctx context.Context, phoneNumberID, to, token, message string) error {
+	payload := WhatsAppOutboundMessage{
+		MessagingProduct: "whatsapp",
+		To:               to,
+		Type:             "text",
+	}
+	payload.Text.Body = message
+	payload.Text.PreviewUrl = false
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal message: %w", err)
+	}
+
+	url := fmt.Sprintf("https://graph.facebook.com/v19.0/%s/messages", phoneNumberID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send message: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("whatsapp api error %d: %s", resp.StatusCode, string(errBody))
+	}
+
+	return nil
 }

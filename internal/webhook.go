@@ -118,5 +118,24 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		"last_message_type": msg.Type,
 	}
 
+	// 1. Generate AI Response
+	aiReply, err := h.ai.Chat(ctx, session.History)
+	if err != nil {
+		h.log.Error("ai chat failed", "err", err)
+		aiReply = "Lo siento, estoy teniendo problemas técnicos en este momento. Por favor intenta de nuevo más tarde."
+	}
+
+	// 2. Save AI Response to History
+	session.History = append(session.History, AIMessage{
+		Role:    "assistant",
+		Content: aiReply,
+	})
+
+	// 3. Send Message back to WhatsApp
+	if err := SendWhatsAppMessage(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken, aiReply); err != nil {
+		h.log.Error("failed to send whatsapp message", "err", err)
+		// We still want to save the session even if sending failed, so we don't return here immediately.
+	}
+
 	return h.sessions.Save(ctx, session)
 }
