@@ -2,12 +2,12 @@ package db
 
 const (
 	QueryInsertTenant = `
-INSERT INTO tenants (name, phone_number_id, pos_provider, pos_config)
+INSERT INTO gobot.tenants (name, whatsapp_phone_id, integration_type, integration_config)
 VALUES ($1, $2, $3, $4)
 RETURNING id, created_at, updated_at`
 
 	QueryResolveTenantByPhoneNumberID = `
-SELECT id, name, phone_number_id, pos_provider, pos_config, created_at, updated_at
-FROM tenants
-WHERE phone_number_id = $1`
+SELECT id, name, whatsapp_phone_id, integration_type, integration_config, created_at, updated_at, whatsapp_token
+FROM gobot.tenants
+WHERE whatsapp_phone_id = $1`
 )

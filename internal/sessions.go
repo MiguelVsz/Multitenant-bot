@@ -10,7 +10,7 @@ import (
 )
 
 type ConversationSession struct {
-	TenantID     int64             `json:"tenant_id"`
+	TenantID     string            `json:"tenant_id"`
 	UserID       string            `json:"user_id"`
 	CurrentState string            `json:"current_state"`
 	Context      map[string]string `json:"context"`
@@ -28,7 +28,7 @@ func NewSessionStore(rdb *redis.Client, ttl time.Duration) *SessionStore {
 	return &SessionStore{rdb: rdb, ttl: ttl}
 }
 
-func (s *SessionStore) Load(ctx context.Context, tenantID int64, userID string) (*ConversationSession, error) {
+func (s *SessionStore) Load(ctx context.Context, tenantID string, userID string) (*ConversationSession, error) {
 	key := s.key(tenantID, userID)
 	raw, err := s.rdb.Get(ctx, key).Result()
 	if err != nil {
@@ -75,10 +75,10 @@ func (s *SessionStore) Save(ctx context.Context, session *ConversationSession) e
 	return s.rdb.Set(ctx, s.key(session.TenantID, session.UserID), payload, s.ttl).Err()
 }
 
-func (s *SessionStore) Delete(ctx context.Context, tenantID int64, userID string) error {
+func (s *SessionStore) Delete(ctx context.Context, tenantID string, userID string) error {
 	return s.rdb.Del(ctx, s.key(tenantID, userID)).Err()
 }
 
-func (s *SessionStore) key(tenantID int64, userID string) string {
-	return fmt.Sprintf("session:%d:%s", tenantID, userID)
+func (s *SessionStore) key(tenantID string, userID string) string {
+	return fmt.Sprintf("session:%s:%s", tenantID, userID)
 }
