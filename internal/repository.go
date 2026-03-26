@@ -14,12 +14,20 @@ import (
 
 var ErrTenantNotFound = errors.New("tenant not found")
 
+type BotConfig struct {
+	WelcomeMessage string   `json:"welcome_message"`
+	MeetingPoints  []string `json:"meeting_points"`
+	MenuLink       string   `json:"menu_link"`
+}
+
 type Tenant struct {
 	ID            string          `json:"id"`
 	Name          string          `json:"name"`
 	PhoneNumberID string          `json:"phone_number_id"`
 	POSProvider   string          `json:"pos_provider"`
 	POSConfig     json.RawMessage `json:"pos_config"`
+	BotConfigRaw  json.RawMessage `json:"-"`
+	BotConfig     BotConfig       `json:"bot_config"`
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
 	WhatsAppToken string          `json:"whatsapp_token"`
@@ -47,6 +55,7 @@ func (r *Repository) ResolveTenantByPhoneNumberID(ctx context.Context, phoneNumb
 		&tenant.PhoneNumberID,
 		&tenant.POSProvider,
 		&tenant.POSConfig,
+		&tenant.BotConfigRaw,
 		&tenant.CreatedAt,
 		&tenant.UpdatedAt,
 		&tenant.WhatsAppToken,
@@ -55,6 +64,10 @@ func (r *Repository) ResolveTenantByPhoneNumberID(ctx context.Context, phoneNumb
 			return nil, ErrTenantNotFound
 		}
 		return nil, err
+	}
+
+	if len(tenant.BotConfigRaw) > 0 {
+		_ = json.Unmarshal(tenant.BotConfigRaw, &tenant.BotConfig)
 	}
 
 	return &tenant, nil

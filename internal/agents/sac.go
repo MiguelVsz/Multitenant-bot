@@ -2,14 +2,15 @@ package agents
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
-
-	appinternal "multi-tenant-bot/internal"
 
 	"github.com/joho/godotenv"
 )
@@ -258,20 +259,49 @@ func handleSAC(input string) string {
 		)
 	}
 
-	client := appinternal.NewGroqClient(apiKey)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	reply, err := client.Chat(ctx, []appinternal.AIMessage{
-		{Role: "system", Content: sacSystemPrompt(sacBusinessType())},
-		{Role: "user", Content: input},
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model": "llama-3.3-70b-versatile",
+		"messages": []map[string]string{
+			{"role": "system", "content": sacSystemPrompt(sacBusinessType())},
+			{"role": "user", "content": input},
+		},
 	})
+	
+	req, _ := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		"https://api.groq.com/openai/v1/chat/completions",
+		bytes.NewReader(reqBody),
+	)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Sprintf(
 			"Entiendo tu solicitud de soporte: %s\n\nNo pude consultar al agente SAC en este momento (%v). Describe tu caso con mas detalle o escribe menu principal para volver.",
 			input,
 			err,
 		)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	var reply string
+	if err := json.Unmarshal(body, &parsed); err != nil || len(parsed.Choices) == 0 {
+		reply = ""
+	} else {
+		reply = parsed.Choices[0].Message.Content
 	}
 
 	reply = strings.TrimSpace(reply)

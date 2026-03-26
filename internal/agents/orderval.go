@@ -1,14 +1,15 @@
 package agents
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
-
-	appinternal "multi-tenant-bot/internal"
 )
 
 const (
@@ -162,7 +163,6 @@ func pickOrderWithAI(userInput string, orders []OrderDetail) (OrderDetail, bool)
 		return OrderDetail{}, false
 	}
 
-	client := appinternal.NewGroqClient(apiKey)
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
@@ -177,13 +177,42 @@ Responde solo con uno de estos valores:
 
 No expliques nada.`, renderOrdersList(orders))
 
-	reply, err := client.Chat(ctx, []appinternal.AIMessage{
-		{Role: "system", Content: prompt},
-		{Role: "user", Content: userInput},
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model": "llama-3.3-70b-versatile",
+		"messages": []map[string]string{
+			{"role": "system", "content": prompt},
+			{"role": "user", "content": userInput},
+		},
 	})
+
+	req, _ := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		"https://api.groq.com/openai/v1/chat/completions",
+		bytes.NewReader(reqBody),
+	)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return OrderDetail{}, false
 	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil || len(parsed.Choices) == 0 {
+		return OrderDetail{}, false
+	}
+
+	reply := parsed.Choices[0].Message.Content
 
 	normalized := strings.TrimSpace(strings.ToUpper(reply))
 	for _, order := range orders {

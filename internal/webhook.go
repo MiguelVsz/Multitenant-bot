@@ -7,6 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
+
+	"multi-tenant-bot/internal/agents"
 )
 
 type WebhookConfig struct {
@@ -109,33 +112,91 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		return err
 	}
 
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string)
+	}
+	session.Metadata["last_message_id"] = msg.MessageID
+	session.Metadata["last_message_type"] = msg.Type
+
 	session.History = append(session.History, AIMessage{
 		Role:    "user",
 		Content: msg.Text,
 	})
-	session.Metadata = map[string]string{
-		"last_message_id":   msg.MessageID,
-		"last_message_type": msg.Type,
+
+	var aiReply string
+	activeAgent := session.Metadata["active_agent"]
+
+	if activeAgent == "orderval" {
+		resp := agents.HandleOrderVal(msg.Text, session.Metadata["orderval_state"], session.Metadata["orderval_context"])
+		aiReply = resp.Message
+		session.Metadata["orderval_state"] = resp.NextState
+		
+		ctxBytes, _ := json.Marshal(resp.NewContext)
+		session.Metadata["orderval_context"] = string(ctxBytes)
+
+		if resp.NextState == "IDLE" {
+			delete(session.Metadata, "active_agent")
+		}
+	} else {
+		route := agents.HandleRouter(msg.Text)
+		
+		switch route.Intent {
+		case agents.RouteIntentGreeting, agents.RouteIntentMainMenu:
+			aiReply = buildWelcomeMessage(tenant.BotConfig)
+		case agents.RouteIntentOrders:
+			session.Metadata["active_agent"] = "orderval"
+			resp := agents.HandleOrderVal(msg.Text, "ORDERVAL_START", "{}")
+			aiReply = resp.Message
+			session.Metadata["orderval_state"] = resp.NextState
+			ctxBytes, _ := json.Marshal(resp.NewContext)
+			session.Metadata["orderval_context"] = string(ctxBytes)
+		case agents.RouteIntentCarta, agents.RouteIntentLocations:
+			aiReply = route.Message + "\n\n" + buildAvailableInfo(tenant.BotConfig)
+		default:
+			aiReply = route.Message
+		}
 	}
 
-	// 1. Generate AI Response
-	aiReply, err := h.ai.Chat(ctx, session.History)
-	if err != nil {
-		h.log.Error("ai chat failed", "err", err)
-		aiReply = "Lo siento, estoy teniendo problemas técnicos en este momento. Por favor intenta de nuevo más tarde."
-	}
-
-	// 2. Save AI Response to History
 	session.History = append(session.History, AIMessage{
 		Role:    "assistant",
 		Content: aiReply,
 	})
 
-	// 3. Send Message back to WhatsApp
 	if err := SendWhatsAppMessage(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken, aiReply); err != nil {
 		h.log.Error("failed to send whatsapp message", "err", err)
-		// We still want to save the session even if sending failed, so we don't return here immediately.
 	}
 
 	return h.sessions.Save(ctx, session)
+}
+
+func buildWelcomeMessage(cfg BotConfig) string {
+	var sb strings.Builder
+	
+	if cfg.WelcomeMessage != "" {
+		sb.WriteString(cfg.WelcomeMessage + "\n\n")
+	} else {
+		sb.WriteString("¡Hola! ¿En qué puedo ayudarte hoy?\n\n")
+	}
+
+	sb.WriteString("Estas son las opciones disponibles:\n")
+	sb.WriteString("📦 Mis ordenes (escribe 'pedidos')\n")
+	if len(cfg.MeetingPoints) > 0 {
+		sb.WriteString("📍 Sedes y Puntos de Encuentro\n")
+	}
+	if cfg.MenuLink != "" {
+		sb.WriteString("🍕 Ver Carta\n")
+	}
+
+	return sb.String()
+}
+
+func buildAvailableInfo(cfg BotConfig) string {
+	var sb strings.Builder
+	if len(cfg.MeetingPoints) > 0 {
+		sb.WriteString("📍 Puntos de Encuentro:\n- " + strings.Join(cfg.MeetingPoints, "\n- ") + "\n\n")
+	}
+	if cfg.MenuLink != "" {
+		sb.WriteString("🍕 Puedes ver nuestra carta aquí: " + cfg.MenuLink)
+	}
+	return sb.String()
 }
