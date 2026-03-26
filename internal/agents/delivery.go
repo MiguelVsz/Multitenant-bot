@@ -5,18 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
-var (
-	ctx = context.Background()
-	rdb *redis.Client
-)
-
+// Constantes de Estado
 const (
 	StateIdle            = "IDLE"
 	StateGreeting        = "GREETING"
@@ -25,13 +20,15 @@ const (
 	StateConfirmingOrder = "CONFIRMING_ORDER"
 	StateOrderPlaced     = "ORDER_PLACED"
 	StateCancelled       = "CANCELLED"
+	StatePayment         = "PAYMENT"
+	StateOrderCreate     = "ORDER_CREATE"
+	StateOrderConfirm    = "ORDER_CONFIRM"
 )
 
 type DeliverySession struct {
 	State       string            `json:"state"`
 	Address     string            `json:"address,omitempty"`
 	Product     string            `json:"product,omitempty"`
-	LastAIReply string            `json:"last_ai_reply,omitempty"`
 	PhoneNumber string            `json:"phone_number"`
 	UserData    map[string]string `json:"user_data"`
 	Cart        []string          `json:"cart"`
@@ -43,25 +40,27 @@ type AgentResponse struct {
 	SessionData *DeliverySession `json:"session_data"`
 }
 
+// HandleDelivery maneja la lógica de la conversación de domicilios
 func HandleDelivery(session *DeliverySession, userMessage string) *AgentResponse {
-	session = ensureDeliverySession(session)
-	userMessage = strings.TrimSpace(userMessage)
+	if session == nil {
+		session = &DeliverySession{State: StateIdle}
+	}
 
 	switch session.State {
+
 	case "", StateIdle:
 		session.State = StateAwaitingAddress
 		return &AgentResponse{
-			Messages:    []string{"Hola, a que direccion te enviamos tu pedido?"},
+			Messages:    []string{"¡Claro! Con gusto te ayudo con tu domicilio. ¿A qué dirección lo enviamos?"},
 			NextState:   StateAwaitingAddress,
 			SessionData: session,
 		}
 
 	case StateAwaitingAddress:
 		session.Address = userMessage
-		session.UserData["address"] = userMessage
 		session.State = StateAwaitingProduct
 		return &AgentResponse{
-			Messages:    []string{fmt.Sprintf("Direccion recibida: %s. Que producto deseas pedir?", session.Address)},
+			Messages:    []string{fmt.Sprintf("Dirección recibida: %s. ¿Qué producto deseas pedir? (Escribe 'carta' para ver opciones)", session.Address)},
 			NextState:   StateAwaitingProduct,
 			SessionData: session,
 		}
@@ -70,142 +69,146 @@ func HandleDelivery(session *DeliverySession, userMessage string) *AgentResponse
 		menu := getMenuFromAPI()
 		apiKey, _ := resolveRouterKey()
 
-		aiReply := callAiForMenu("Burgers & Co", userMessage, menu)
-		if strings.TrimSpace(aiReply) == "" {
-			aiReply = "Perfecto. Indica los productos que deseas y luego confirma escribiendo 'si'."
-		}
-
-		detectedItems := updateCartWithAI(userMessage, menu)
-		if len(detectedItems) == 0 {
-			detectedItems = extractItemsFallback(userMessage, menu)
-		}
-
-		if len(detectedItems) > 0 {
-			session.Cart = append(session.Cart, detectedItems...)
-			session.Product = strings.Join(session.Cart, ", ")
-		} else {
-			session.Product = userMessage
-		}
-
-		// Si hay API key, intentamos una respuesta mas comercial.
-		if apiKey != "" {
-			systemSales := fmt.Sprintf(
-				"Eres el asistente de Burgers & Co. Menu: %s. Responde amablemente, confirma lo que el cliente quiere y pide confirmar escribiendo 'si'.",
-				menu,
-			)
-			if enriched := callGroqDirect(systemSales, userMessage, apiKey); strings.TrimSpace(enriched) != "" {
-				aiReply = enriched
+		// Si el usuario solo quiere ver el menú, se lo mostramos y nos quedamos aquí
+		if strings.ToLower(strings.TrimSpace(userMessage)) == "carta" {
+			return &AgentResponse{
+				Messages:    []string{"Mira nuestro menú:\n" + menu + "\n\n¿Qué te gustaría pedir?"},
+				NextState:   StateAwaitingProduct,
+				SessionData: session,
 			}
 		}
 
-		session.LastAIReply = aiReply
+		// Intentamos IA
+		systemSales := fmt.Sprintf(`Eres el asistente virtual del restaurante Burgers & Co.
+		Ayudas al cliente a elegir del menú usando solo estos productos: %s
+		Prioriza recomendar combos y promociones. Sé amable, claro y breve.
+		Nunca inventes productos fuera de la lista.
+		Si el cliente no sabe qué pedir, hazle una pregunta corta sobre su preferencia.
+		Formato de respuesta: Nombre del producto — descripción corta — precio.
+		Ejemplo: Combo Clásico — Hamburguesa + papas + bebida — $18.000`, menu)
+		aiReply := callGroqDirect(systemSales, userMessage, apiKey)
+
+		// GUARDAMOS EL PRODUCTO (ya sea lo que dijo la IA o el texto bruto del usuario)
+		if aiReply != "" {
+			session.Product = aiReply
+		} else {
+			session.Product = userMessage // Plan B: guardamos el texto tal cual
+		}
+
+		// AVANZAMOS DE ESTADO SIEMPRE (Aquí se rompe el bucle)
 		session.State = StateConfirmingOrder
 
+		replyText := aiReply
+		if replyText == "" {
+			replyText = fmt.Sprintf("¡Excelente elección! Anotado: %s.", userMessage)
+		}
+
 		return &AgentResponse{
-			Messages:    []string{aiReply, "Confirmas tu pedido? (si/no)"},
+			Messages:    []string{replyText, "¿Confirmas tu pedido? (Si/No)"},
 			NextState:   StateConfirmingOrder,
 			SessionData: session,
 		}
 
 	case StateConfirmingOrder:
 		if isPositive(userMessage) {
-			session.State = StateOrderPlaced
+			session.State = StatePayment
 			return &AgentResponse{
-				Messages:    []string{fmt.Sprintf("Excelente. Tu pedido de %s ha sido enviado. Llegara en 30 min.", session.Product)},
-				NextState:   StateOrderPlaced,
+				Messages:    []string{"¡Perfecto! ¿Cómo deseas pagar? Tenemos: **Efectivo** o **Transferencia**."},
+				NextState:   StatePayment,
 				SessionData: session,
 			}
 		}
 
 		if isNegative(userMessage) {
-			cancelled := ensureDeliverySession(&DeliverySession{
-				State:       StateCancelled,
-				PhoneNumber: session.PhoneNumber,
-			})
+			session.State = StateCancelled
 			return &AgentResponse{
-				Messages:    []string{"Pedido cancelado. Si quieres pedir otra cosa, dime la direccion de entrega."},
+				Messages:    []string{"Pedido cancelado. ¿Te puedo ayudar con algo más?"},
 				NextState:   StateCancelled,
-				SessionData: cancelled,
+				SessionData: &DeliverySession{State: StateIdle},
 			}
 		}
-
 		return &AgentResponse{
-			Messages:    []string{"Confirmas el pedido? Responde si o no."},
+			Messages:    []string{"Por favor, confirma con 'si' o 'no'."},
 			NextState:   StateConfirmingOrder,
 			SessionData: session,
 		}
 
-	case StateOrderPlaced, StateCancelled:
-		reset := ensureDeliverySession(&DeliverySession{
-			State:       StateAwaitingAddress,
-			PhoneNumber: session.PhoneNumber,
-		})
+	case StatePayment:
+		// 1. Validamos lo que el usuario escribió después de la pregunta de pago
+		metodo := strings.ToLower(userMessage)
+		if strings.Contains(metodo, "efectivo") || strings.Contains(metodo, "transferencia") {
+
+			// 2. Aquí es donde realmente "Crearías la orden" (StateOrderCreate)
+			// Por ahora lo simulamos avanzando al éxito
+			session.State = StateOrderPlaced
+
+			return &AgentResponse{
+				Messages: []string{
+					fmt.Sprintf("✅ Pago por %s registrado.", userMessage),
+					"Estamos creando tu orden en el sistema... ⏳",
+					"¡Listo! Tu pedido #1234 ha sido confirmado. Llegará en 30 min.",
+				},
+				NextState:   StateOrderPlaced,
+				SessionData: session,
+			}
+		}
+
+		// Si el usuario escribe otra cosa que no sea el método de pago
 		return &AgentResponse{
-			Messages:    []string{"Si quieres hacer otro pedido, dime la direccion de entrega."},
-			NextState:   StateAwaitingAddress,
-			SessionData: reset,
+			Messages:    []string{"Por favor, indica si prefieres **Efectivo** o **Transferencia** para continuar."},
+			NextState:   StatePayment,
+			SessionData: session,
 		}
 
 	default:
-		session.State = StateGreeting
+		session.State = StateAwaitingAddress
 		return &AgentResponse{
-			Messages:    []string{"No entendi tu mensaje. Podrias repetirlo?"},
-			NextState:   StateGreeting,
+			Messages:    []string{"Si quieres hacer un pedido, dime la dirección de entrega."},
+			NextState:   StateAwaitingAddress,
 			SessionData: session,
 		}
 	}
 }
 
-func isPositive(msg string) bool {
-	s := strings.ToLower(strings.TrimSpace(msg))
-	return strings.Contains(s, "si") || strings.Contains(s, "ok") || strings.Contains(s, "confirmo")
-}
-
-func isNegative(msg string) bool {
-	s := strings.ToLower(strings.TrimSpace(msg))
-	return strings.Contains(s, "no") || strings.Contains(s, "cancelar")
-}
+// --- FUNCIONES DE APOYO ---
 
 func callGroqDirect(systemPrompt string, userPrompt string, apiKey string) string {
-	if strings.TrimSpace(apiKey) == "" {
+	if apiKey == "" {
 		return ""
 	}
 
-	reqBody, err := json.Marshal(routerGroqRequest{
+	reqBody, _ := json.Marshal(routerGroqRequest{
 		Model: "llama-3.3-70b-versatile",
 		Messages: []routerMsg{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
 	})
-	if err != nil {
-		return ""
-	}
 
-	reqCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(
-		reqCtx,
-		http.MethodPost,
-		"https://api.groq.com/openai/v1/chat/completions",
-		bytes.NewReader(reqBody),
-	)
-	if err != nil {
-		return ""
-	}
-
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.groq.com/openai/v1/chat/completions", bytes.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		fmt.Println("❌ ERROR DE RED:", err) // ESTO ES CLAVE
 		return ""
 	}
 	defer resp.Body.Close()
 
+	// Si Groq nos da un error (ej: 401 Unauthorized o 429 Rate Limit)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("❌ ERROR DE API GROQ (Status %d): %s\n", resp.StatusCode, string(body))
+		return ""
+	}
+
 	var parsed routerGroqResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		fmt.Println("❌ ERROR DECODE:", err)
 		return ""
 	}
 
@@ -213,179 +216,55 @@ func callGroqDirect(systemPrompt string, userPrompt string, apiKey string) strin
 		return strings.TrimSpace(parsed.Choices[0].Message.Content)
 	}
 
+	// Si llegamos aquí, la IA respondió algo vacío o hubo un error de API
+	fmt.Printf("Groq devolvió 0 opciones. Status: %s\n", resp.Status)
 	return ""
-}
-
-func updateCartWithAI(userInput string, menuData string) []string {
-	apiKey, _ := resolveRouterKey()
-	prompt := fmt.Sprintf(
-		"Del siguiente mensaje: '%s', extrae los nombres de productos que el usuario quiere pedir basados en este menu: %s. Responde SOLO con los nombres separados por comas, nada mas.",
-		userInput,
-		menuData,
-	)
-
-	aiResponse := callGroqDirect("Eres un extractor de productos.", prompt, apiKey)
-	if strings.TrimSpace(aiResponse) == "" {
-		return []string{}
-	}
-
-	items := strings.Split(aiResponse, ",")
-	return normalizeItems(items)
 }
 
 func MainHandler(phoneNumber string, userInput string) string {
 	session := getSessionFromRedis(phoneNumber)
+
+	// Si el bot está libre, el Router decide qué hacer
+	if session.State == StateIdle || session.State == "" {
+		route := HandleRouter(userInput)
+		if route.Intent == "delivery" || route.Intent == "carta" {
+			session.State = StateAwaitingAddress
+			saveSessionToRedis(phoneNumber, session)
+			return "¡Claro! ¿A qué dirección enviamos tu pedido?"
+		}
+		return route.Message
+	}
+
+	// Si ya hay proceso iniciado, seguimos en Delivery
 	agentRes := HandleDelivery(session, userInput)
 	saveSessionToRedis(phoneNumber, agentRes.SessionData)
 	return strings.Join(agentRes.Messages, "\n")
 }
 
-func callAiForMenu(businessName string, userInput string, menuData string) string {
-	apiKey, _ := resolveRouterKey()
-	if strings.TrimSpace(apiKey) == "" {
-		items := extractItemsFallback(userInput, menuData)
-		if len(items) == 0 {
-			return fmt.Sprintf("Menu de %s: %s", businessName, menuData)
-		}
-		return fmt.Sprintf("Perfecto, detecte estos productos: %s. Si todo esta bien, responde 'si' para confirmar.", strings.Join(items, ", "))
-	}
+func isPositive(msg string) bool {
+	s := strings.ToLower(msg)
+	return strings.Contains(s, "si") || strings.Contains(s, "ok") || strings.Contains(s, "vale")
+}
 
-	systemPrompt := fmt.Sprintf(`Eres el asistente de %s.
-Menu oficial: %s
-
-Reglas:
-- Formato: Nombre -> Descripcion -> Precio.
-- Si el cliente elige, confirma los productos y dile: "Escribe 'si' para confirmar tu pedido".
-- Nunca inventes productos.`, businessName, menuData)
-
-	return callGroqDirect(systemPrompt, userInput, apiKey)
+func isNegative(msg string) bool {
+	s := strings.ToLower(msg)
+	return strings.Contains(s, "no") || strings.Contains(s, "cancelar")
 }
 
 func getMenuFromAPI() string {
-	return "1. Combo Clasico: Hamburguesa + Papas + Gaseosa - $18.000, " +
-		"2. Combo Parrillero: Carne Angus + Queso + Chorizo - $25.000, " +
-		"3. Papas Fritas - $8.000"
+	return "1. Combo Clásico ($18.000), 2. Combo Parrillero ($25.000), 3. Papas Fritas ($8.000)"
 }
 
+// PERSISTENCIA TEMPORAL (Simulando Redis)
+var tempStorage = make(map[string]*DeliverySession)
+
 func getSessionFromRedis(phoneNumber string) *DeliverySession {
-	if rdb == nil {
-		return ensureDeliverySession(&DeliverySession{
-			PhoneNumber: phoneNumber,
-			State:       StateIdle,
-		})
+	if s, ok := tempStorage[phoneNumber]; ok {
+		return s
 	}
-
-	val, err := rdb.Get(ctx, "session:"+phoneNumber).Result()
-	if err != nil {
-		return ensureDeliverySession(&DeliverySession{
-			PhoneNumber: phoneNumber,
-			State:       StateIdle,
-		})
-	}
-
-	var session DeliverySession
-	if err := json.Unmarshal([]byte(val), &session); err != nil {
-		fmt.Println("error deserializando sesion:", err)
-		return ensureDeliverySession(&DeliverySession{
-			PhoneNumber: phoneNumber,
-			State:       StateIdle,
-		})
-	}
-
-	if session.PhoneNumber == "" {
-		session.PhoneNumber = phoneNumber
-	}
-
-	return ensureDeliverySession(&session)
+	return &DeliverySession{PhoneNumber: phoneNumber, State: StateIdle}
 }
 
 func saveSessionToRedis(phoneNumber string, session *DeliverySession) {
-	if session == nil || rdb == nil {
-		return
-	}
-
-	session = ensureDeliverySession(session)
-	if session.PhoneNumber == "" {
-		session.PhoneNumber = phoneNumber
-	}
-
-	data, err := json.Marshal(session)
-	if err != nil {
-		fmt.Println("error serializando sesion:", err)
-		return
-	}
-
-	if err := rdb.Set(ctx, "session:"+phoneNumber, data, 24*time.Hour).Err(); err != nil {
-		fmt.Println("error guardando en redis:", err)
-	}
-}
-
-func ensureDeliverySession(session *DeliverySession) *DeliverySession {
-	if session == nil {
-		session = &DeliverySession{}
-	}
-	if session.State == "" {
-		session.State = StateIdle
-	}
-	if session.UserData == nil {
-		session.UserData = map[string]string{}
-	}
-	if session.Cart == nil {
-		session.Cart = []string{}
-	}
-	return session
-}
-
-func extractItemsFallback(userInput string, _ string) []string {
-	lower := strings.ToLower(userInput)
-	var items []string
-
-	if strings.Contains(lower, "combo clasico") {
-		items = append(items, "Combo Clasico")
-	}
-	if strings.Contains(lower, "combo parrillero") {
-		items = append(items, "Combo Parrillero")
-	}
-	if strings.Contains(lower, "papas") {
-		items = append(items, "Papas Fritas")
-	}
-	if strings.Contains(lower, "hamburguesa") && !containsItem(items, "Combo Clasico") && !containsItem(items, "Combo Parrillero") {
-		items = append(items, "Hamburguesa")
-	}
-	if strings.Contains(lower, "gaseosa") {
-		items = append(items, "Gaseosa")
-	}
-
-	return normalizeItems(items)
-}
-
-func normalizeItems(items []string) []string {
-	seen := make(map[string]struct{}, len(items))
-	clean := make([]string, 0, len(items))
-
-	for _, item := range items {
-		item = strings.TrimSpace(item)
-		item = strings.Trim(item, ".-")
-		if item == "" {
-			continue
-		}
-		key := strings.ToLower(item)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		clean = append(clean, item)
-	}
-
-	return clean
-}
-
-func containsItem(items []string, target string) bool {
-	target = strings.ToLower(strings.TrimSpace(target))
-	for _, item := range items {
-		if strings.ToLower(strings.TrimSpace(item)) == target {
-			return true
-		}
-	}
-	return false
+	tempStorage[phoneNumber] = session
 }
