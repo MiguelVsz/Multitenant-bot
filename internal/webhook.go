@@ -133,7 +133,14 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 	activeAgent := session.Metadata["active_agent"]
 
 	// Detección global de intenciones de regresar al menú o navegar fuera de un agente.
-	wantsExit := strings.Contains(textNorm, "menu principal") ||
+	wantsReset := strings.Contains(textNorm, "finalizar") ||
+		strings.Contains(textNorm, "reiniciar") ||
+		strings.Contains(textNorm, "reset") ||
+		strings.Contains(textNorm, "empezar de nuevo") ||
+		strings.Contains(textNorm, "nueva sesion")
+
+	wantsExit := wantsReset ||
+		strings.Contains(textNorm, "menu principal") ||
 		strings.Contains(textNorm, "volver") ||
 		strings.Contains(textNorm, "salir") ||
 		strings.Contains(textNorm, "cancelar") ||
@@ -143,6 +150,13 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 	if wantsExit {
 		activeAgent = ""
 		delete(session.Metadata, "active_agent")
+		if wantsReset {
+			// Limpiar historial para empezar de cero
+			session.History = []AIMessage{}
+			// Limpiar estados específicos de agentes
+			delete(session.Metadata, "orderval_state")
+			delete(session.Metadata, "orderval_context")
+		}
 	}
 
 	if activeAgent == "orderval" {
