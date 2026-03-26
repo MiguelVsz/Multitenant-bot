@@ -112,7 +112,7 @@ func handleConsoleInput(session *consoleSession, input string) string {
 		return joinTransition(route.Message, applyUpdateData(session, input))
 	case RouteIntentSAC:
 		session.ActiveAgent = consoleAgentSAC
-		return joinTransition(route.Message, handleSAC(input))
+		return joinTransition(route.Message, HandleSAC(input))
 	default:
 		return route.Message
 	}
@@ -131,7 +131,7 @@ func continueActiveFlow(session *consoleSession, input string) string {
 	case consoleAgentUpdateData:
 		return applyUpdateData(session, input)
 	case consoleAgentSAC:
-		reply := handleSAC(input)
+		reply := HandleSAC(input)
 		if strings.Contains(strings.ToLower(input), "gracias") || strings.Contains(strings.ToLower(input), "listo") {
 			resetConsoleSession(session)
 		}
@@ -185,7 +185,7 @@ func applyCarta(session *consoleSession, input string) string {
 		session.Delivery = nil
 		session.CurrentState = ""
 		session.CurrentContext = ""
-		return joinTransition("Te ayudo con soporte.", handleSAC(input))
+		return joinTransition("Te ayudo con soporte.", HandleSAC(input))
 	default:
 		return "Te sigo ayudando con la carta. Dime si lo quieres a domicilio, para recoger en tienda, o si prefieres volver al menu principal."
 	}
@@ -250,7 +250,7 @@ func applyUpdateData(session *consoleSession, input string) string {
 	return resp.Message
 }
 
-func handleSAC(input string) string {
+func HandleSAC(input string) string {
 	apiKey := resolveSACKey()
 	if apiKey == "" {
 		return fmt.Sprintf(

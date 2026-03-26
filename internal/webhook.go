@@ -138,6 +138,14 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		if resp.NextState == "IDLE" {
 			delete(session.Metadata, "active_agent")
 		}
+	} else if activeAgent == "sac" {
+		textTrim := strings.TrimSpace(strings.ToLower(msg.Text))
+		if textTrim == "menu" || textTrim == "menu principal" || textTrim == "volver" || textTrim == "salir" {
+			delete(session.Metadata, "active_agent")
+			aiReply = buildWelcomeMessage(tenant.BotConfig)
+		} else {
+			aiReply = agents.HandleSAC(msg.Text)
+		}
 	} else {
 		textTrim := strings.TrimSpace(msg.Text)
 		var route agents.RouterResponse
@@ -149,6 +157,8 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			route = agents.RouterResponse{Intent: agents.RouteIntentLocations, Message: "Claro, aquí tienes nuestras zonas de cobertura y puntos."}
 		case "3":
 			route = agents.RouterResponse{Intent: agents.RouteIntentOrders, Message: "Muy bien, revisemos el estado de tus órdenes."}
+		case "4":
+			route = agents.RouterResponse{Intent: agents.RouteIntentSAC, Message: "Entendido, te contactaremos con Soporte (PQR)."}
 		default:
 			route = agents.HandleRouter(msg.Text)
 		}
@@ -199,6 +209,9 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 				sb.WriteString("\nSi necesitas algo más, escribe *menu principal*.")
 				aiReply = sb.String()
 			}
+	case agents.RouteIntentSAC:
+			session.Metadata["active_agent"] = "sac"
+			aiReply = route.Message + "\n\n" + agents.HandleSAC(msg.Text)
 		default:
 			aiReply = route.Message
 		}
@@ -229,6 +242,7 @@ func buildWelcomeMessage(cfg BotConfig) string {
 	sb.WriteString("1. 🍕 Ver y pedir de la Carta\n")
 	sb.WriteString("2. 📍 Ver Puntos de Venta (Sedes)\n")
 	sb.WriteString("3. 📦 Revisar mis órdenes\n")
+	sb.WriteString("4. 🎧 Servicio al Cliente (PQRS)\n")
 
 	return sb.String()
 }
