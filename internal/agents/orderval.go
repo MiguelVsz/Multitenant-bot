@@ -37,14 +37,12 @@ type OrderValResponse struct {
 	NewContext map[string]string
 }
 
-func HandleOrderVal(userInput string, currentState string, currentContext string) OrderValResponse {
+func HandleOrderVal(userInput string, currentState string, currentContext string, orders []OrderDetail, historyJSON string) OrderValResponse {
 	var context map[string]string
 	_ = json.Unmarshal([]byte(currentContext), &context)
 	if context == nil {
 		context = map[string]string{}
 	}
-
-	orders := mockActiveOrders()
 
 	switch currentState {
 	case "", "IDLE", "ORDERVAL_START":
@@ -66,7 +64,7 @@ func HandleOrderVal(userInput string, currentState string, currentContext string
 	case StateOrderValList:
 		selected, ok := pickOrder(userInput, orders)
 		if !ok {
-			selected, ok = pickOrderWithAI(userInput, orders)
+			selected, ok = pickOrderWithAI(userInput, orders, historyJSON)
 		}
 		if !ok {
 			return OrderValResponse{
@@ -106,29 +104,10 @@ func HandleOrderVal(userInput string, currentState string, currentContext string
 	}
 }
 
-func mockActiveOrders() []OrderDetail {
-	return []OrderDetail{
-		{
-			ID:      "ORD-1001",
-			Status:  "En preparacion",
-			Items:   []string{"1 Hamburguesa Clasica", "1 Papas Medianas"},
-			Address: "Calle 123 #45-67, Bogota",
-			Total:   "$38.000",
-		},
-		{
-			ID:      "ORD-1002",
-			Status:  "En camino",
-			Items:   []string{"2 Combos BBQ"},
-			Address: "Carrera 10 #20-30, Bogota",
-			Total:   "$54.000",
-		},
-	}
-}
-
 func renderOrdersList(orders []OrderDetail) string {
-	lines := []string{"Estas son tus ordenes activas:"}
+	lines := []string{"Estas son tus órdenes activas:"}
 	for i, order := range orders {
-		lines = append(lines, fmt.Sprintf("%d. %s - %s - %s", i+1, order.ID, order.Status, order.Total))
+		lines = append(lines, fmt.Sprintf("%d. *%s* - %s - Total: %s\n   _Productos: %s_", i+1, order.ID, order.Status, order.Total, strings.Join(order.Items, ", ")))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -154,7 +133,7 @@ func pickOrder(input string, orders []OrderDetail) (OrderDetail, bool) {
 	return OrderDetail{}, false
 }
 
-func pickOrderWithAI(userInput string, orders []OrderDetail) (OrderDetail, bool) {
+func pickOrderWithAI(userInput string, orders []OrderDetail, historyJSON string) (OrderDetail, bool) {
 	apiKey := strings.TrimSpace(os.Getenv("AGENT_ORDERVAL_KEY"))
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(os.Getenv("GROQ_API_KEY"))
@@ -166,23 +145,40 @@ func pickOrderWithAI(userInput string, orders []OrderDetail) (OrderDetail, bool)
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
-	prompt := fmt.Sprintf(`Debes identificar a cual orden se refiere el usuario.
+	prompt := fmt.Sprintf(`Debes identificar a cuál orden se refiere el usuario basándote en su descripción, el ID o los productos del pedido.
 
-Ordenes disponibles:
+Órdenes disponibles (analiza los productos de cada una):
 %s
 
-Responde solo con uno de estos valores:
-- el ID exacto de una orden disponible
-- UNKNOWN si no es posible identificarla
+Instrucciones:
+1. Responde solo con el ID EXACTO de la orden si puedes deducirlo de la intención del usuario.
+2. Si la descripción es ambigua o no coincide clara/lógicamente con los productos u órdenes disponibles, responde UNKNOWN.
+3. No expliques nada, tu salida debe ser literalmente el ID o UNKNOWN.`, renderOrdersList(orders))
 
-No expliques nada.`, renderOrdersList(orders))
+	var messages []map[string]string
+	messages = append(messages, map[string]string{"role": "system", "content": prompt})
+
+	var history []map[string]string
+	if historyJSON != "" {
+		_ = json.Unmarshal([]byte(historyJSON), &history)
+		// Incluir solo los últimos 6 mensajes del historial
+		startIdx := 0
+		if len(history) > 6 {
+			startIdx = len(history) - 6
+		}
+		for i := startIdx; i < len(history); i++ {
+			if history[i]["role"] != "system" {
+				messages = append(messages, history[i])
+			}
+		}
+	} else {
+		// Fallback si no hay historial enviado, usamos el input
+		messages = append(messages, map[string]string{"role": "user", "content": userInput})
+	}
 
 	reqBody, _ := json.Marshal(map[string]interface{}{
 		"model": "llama-3.3-70b-versatile",
-		"messages": []map[string]string{
-			{"role": "system", "content": prompt},
-			{"role": "user", "content": userInput},
-		},
+		"messages": messages,
 	})
 
 	req, _ := http.NewRequestWithContext(

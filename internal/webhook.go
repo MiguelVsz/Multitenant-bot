@@ -125,10 +125,35 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 	})
 
 	var aiReply string
+	
+	textLower := strings.ToLower(strings.TrimSpace(msg.Text))
+	textNorm := strings.ReplaceAll(textLower, "ú", "u")
+	textNorm = strings.ReplaceAll(textNorm, "í", "i")
+	
 	activeAgent := session.Metadata["active_agent"]
 
+	// Detección global de intenciones de regresar al menú o navegar fuera de un agente.
+	wantsExit := strings.Contains(textNorm, "menu principal") ||
+		strings.Contains(textNorm, "volver") ||
+		strings.Contains(textNorm, "salir") ||
+		strings.Contains(textNorm, "cancelar") ||
+		// En SAC, los números de menú también actúan como salida de emergencia.
+		(activeAgent == "sac" && (textNorm == "1" || textNorm == "2" || textNorm == "3" || textNorm == "4" || strings.Contains(textNorm, "menu") || strings.Contains(textNorm, "opciones")))
+
+	if wantsExit {
+		activeAgent = ""
+		delete(session.Metadata, "active_agent")
+	}
+
 	if activeAgent == "orderval" {
-		resp := agents.HandleOrderVal(msg.Text, session.Metadata["orderval_state"], session.Metadata["orderval_context"])
+		records, err := h.repo.GetActiveOrdersByPhone(ctx, tenant.ID, msg.From)
+		if err != nil {
+			h.log.Error("error getting orders", "err", err)
+		}
+		orders := mapOrderRecords(records)
+		historyJSON, _ := json.Marshal(session.History)
+
+		resp := agents.HandleOrderVal(msg.Text, session.Metadata["orderval_state"], session.Metadata["orderval_context"], orders, string(historyJSON))
 		aiReply = resp.Message
 		session.Metadata["orderval_state"] = resp.NextState
 		
@@ -139,13 +164,7 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			delete(session.Metadata, "active_agent")
 		}
 	} else if activeAgent == "sac" {
-		textTrim := strings.TrimSpace(strings.ToLower(msg.Text))
-		if textTrim == "menu" || textTrim == "menu principal" || textTrim == "volver" || textTrim == "salir" {
-			delete(session.Metadata, "active_agent")
-			aiReply = buildWelcomeMessage(tenant.BotConfig)
-		} else {
-			aiReply = agents.HandleSAC(msg.Text)
-		}
+		aiReply = agents.HandleSAC(msg.Text)
 	} else {
 		textTrim := strings.TrimSpace(msg.Text)
 		var route agents.RouterResponse
@@ -167,12 +186,23 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		case agents.RouteIntentGreeting, agents.RouteIntentMainMenu:
 			aiReply = buildWelcomeMessage(tenant.BotConfig)
 		case agents.RouteIntentOrders:
-			session.Metadata["active_agent"] = "orderval"
-			resp := agents.HandleOrderVal(msg.Text, "ORDERVAL_START", "{}")
-			aiReply = resp.Message
-			session.Metadata["orderval_state"] = resp.NextState
-			ctxBytes, _ := json.Marshal(resp.NewContext)
-			session.Metadata["orderval_context"] = string(ctxBytes)
+			records, err := h.repo.GetActiveOrdersByPhone(ctx, tenant.ID, msg.From)
+			if err != nil {
+				h.log.Error("error getting orders", "err", err)
+			}
+			orders := mapOrderRecords(records)
+			
+			if len(orders) == 0 {
+				aiReply = route.Message + "\n\nNo tienes órdenes activas en este momento."
+			} else {
+				session.Metadata["active_agent"] = "orderval"
+				historyJSON, _ := json.Marshal(session.History)
+				resp := agents.HandleOrderVal(msg.Text, "ORDERVAL_START", "{}", orders, string(historyJSON))
+				aiReply = resp.Message
+				session.Metadata["orderval_state"] = resp.NextState
+				ctxBytes, _ := json.Marshal(resp.NewContext)
+				session.Metadata["orderval_context"] = string(ctxBytes)
+			}
 		case agents.RouteIntentCarta:
 			products, err := h.repo.GetProducts(ctx, tenant.ID)
 			if err != nil {
@@ -245,4 +275,22 @@ func buildWelcomeMessage(cfg BotConfig) string {
 	sb.WriteString("4. 🎧 Servicio al Cliente (PQRS)\n")
 
 	return sb.String()
+}
+
+func mapOrderRecords(records []OrderRecord) []agents.OrderDetail {
+	var res []agents.OrderDetail
+	for _, r := range records {
+		var items []string
+		for _, item := range r.Items {
+			items = append(items, fmt.Sprintf("%d x %s", item.Quantity, item.Name))
+		}
+		res = append(res, agents.OrderDetail{
+			ID:      r.ID,
+			Status:  r.Status,
+			Items:   items,
+			Address: r.Address,
+			Total:   fmt.Sprintf("$%.2f", r.Total),
+		})
+	}
+	return res
 }

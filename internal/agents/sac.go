@@ -223,7 +223,7 @@ func applyPickup(session *consoleSession, input string) string {
 }
 
 func applyOrderVal(session *consoleSession, input string) string {
-	resp := HandleOrderVal(input, session.CurrentState, session.CurrentContext)
+	resp := HandleOrderVal(input, session.CurrentState, session.CurrentContext, []OrderDetail{}, "")
 	session.CurrentState = resp.NextState
 	session.CurrentContext = mustMarshalContext(resp.NewContext)
 

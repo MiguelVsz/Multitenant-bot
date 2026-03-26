@@ -36,6 +36,20 @@ type CoverageZone struct {
 	MinOrder    float64 `json:"min_order"`
 }
 
+type OrderRecord struct {
+	ID      string
+	Status  string
+	Total   float64
+	Address string
+	Notes   string
+	Items   []OrderItemRecord
+}
+
+type OrderItemRecord struct {
+	Name     string `json:"name"`
+	Quantity int    `json:"quantity"`
+}
+
 type Tenant struct {
 	ID            string          `json:"id"`
 	Name          string          `json:"name"`
@@ -140,4 +154,33 @@ func (r *Repository) GetCoverageZones(ctx context.Context, tenantID string) ([]C
 	}
 
 	return zones, nil
+}
+
+func (r *Repository) GetActiveOrdersByPhone(ctx context.Context, tenantID string, phone string) ([]OrderRecord, error) {
+	rows, err := r.db.Query(ctx, db.QueryGetActiveOrdersByPhone, tenantID, phone)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var orders []OrderRecord
+	for rows.Next() {
+		var o OrderRecord
+		var itemsJSON string
+		if err := rows.Scan(&o.ID, &o.Status, &o.Total, &o.Address, &o.Notes, &itemsJSON); err != nil {
+			return nil, err
+		}
+		
+		if itemsJSON != "" {
+			_ = json.Unmarshal([]byte(itemsJSON), &o.Items)
+		}
+		
+		orders = append(orders, o)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return orders, nil
 }
