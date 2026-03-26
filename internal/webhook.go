@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -138,7 +139,19 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			delete(session.Metadata, "active_agent")
 		}
 	} else {
-		route := agents.HandleRouter(msg.Text)
+		textTrim := strings.TrimSpace(msg.Text)
+		var route agents.RouterResponse
+		
+		switch textTrim {
+		case "1":
+			route = agents.RouterResponse{Intent: agents.RouteIntentCarta, Message: "Excelente, te compartiré nuestra lista de productos."}
+		case "2":
+			route = agents.RouterResponse{Intent: agents.RouteIntentLocations, Message: "Claro, aquí tienes nuestras zonas de cobertura y puntos."}
+		case "3":
+			route = agents.RouterResponse{Intent: agents.RouteIntentOrders, Message: "Muy bien, revisemos el estado de tus órdenes."}
+		default:
+			route = agents.HandleRouter(msg.Text)
+		}
 		
 		switch route.Intent {
 		case agents.RouteIntentGreeting, agents.RouteIntentMainMenu:
@@ -150,8 +163,42 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			session.Metadata["orderval_state"] = resp.NextState
 			ctxBytes, _ := json.Marshal(resp.NewContext)
 			session.Metadata["orderval_context"] = string(ctxBytes)
-		case agents.RouteIntentCarta, agents.RouteIntentLocations:
-			aiReply = route.Message + "\n\n" + buildAvailableInfo(tenant.BotConfig)
+		case agents.RouteIntentCarta:
+			products, err := h.repo.GetProducts(ctx, tenant.ID)
+			if err != nil {
+				h.log.Error("failed to get products", "err", err)
+				aiReply = route.Message + "\n\nLo siento, hubo un problema al cargar la carta. Intenta de nuevo más tarde."
+			} else if len(products) == 0 {
+				aiReply = route.Message + "\n\nActualmente no tenemos productos disponibles en la carta."
+			} else {
+				var sb strings.Builder
+				sb.WriteString(route.Message + "\n\n📋 *NUESTRA CARTA*\n\n")
+				for i, p := range products {
+					desc := ""
+					if p.Description != nil && *p.Description != "" {
+						desc = fmt.Sprintf(" - %s", *p.Description)
+					}
+					sb.WriteString(fmt.Sprintf("%d. %s: $%.0f%s\n", i+1, p.Name, p.Price, desc))
+				}
+				sb.WriteString("\n¿Qué deseas ordenar? Escribe el nombre del producto o elige otra opción escribiendo *menu principal*.")
+				aiReply = sb.String()
+			}
+		case agents.RouteIntentLocations:
+			zones, err := h.repo.GetCoverageZones(ctx, tenant.ID)
+			if err != nil {
+				h.log.Error("failed to get coverage zones", "err", err)
+				aiReply = route.Message + "\n\nLo siento, hubo un error al cargar nuestros puntos de venta."
+			} else if len(zones) == 0 {
+				aiReply = route.Message + "\n\nNo hay puntos de venta o zonas configuradas actualmente."
+			} else {
+				var sb strings.Builder
+				sb.WriteString(route.Message + "\n\n📍 *PUNTOS DE VENTA Y ZONAS*\n\n")
+				for _, z := range zones {
+					sb.WriteString(fmt.Sprintf("- %s (Min. orden: $%.0f, Domicilio: $%.0f)\n", z.Name, z.MinOrder, z.DeliveryFee))
+				}
+				sb.WriteString("\nSi necesitas algo más, escribe *menu principal*.")
+				aiReply = sb.String()
+			}
 		default:
 			aiReply = route.Message
 		}
@@ -178,25 +225,10 @@ func buildWelcomeMessage(cfg BotConfig) string {
 		sb.WriteString("¡Hola! ¿En qué puedo ayudarte hoy?\n\n")
 	}
 
-	sb.WriteString("Estas son las opciones disponibles:\n")
-	sb.WriteString("📦 Mis ordenes (escribe 'pedidos')\n")
-	if len(cfg.MeetingPoints) > 0 {
-		sb.WriteString("📍 Sedes y Puntos de Encuentro\n")
-	}
-	if cfg.MenuLink != "" {
-		sb.WriteString("🍕 Ver Carta\n")
-	}
+	sb.WriteString("Responde con el número de la opción que prefieras:\n")
+	sb.WriteString("1. 🍕 Ver y pedir de la Carta\n")
+	sb.WriteString("2. 📍 Ver Puntos de Venta (Sedes)\n")
+	sb.WriteString("3. 📦 Revisar mis órdenes\n")
 
-	return sb.String()
-}
-
-func buildAvailableInfo(cfg BotConfig) string {
-	var sb strings.Builder
-	if len(cfg.MeetingPoints) > 0 {
-		sb.WriteString("📍 Puntos de Encuentro:\n- " + strings.Join(cfg.MeetingPoints, "\n- ") + "\n\n")
-	}
-	if cfg.MenuLink != "" {
-		sb.WriteString("🍕 Puedes ver nuestra carta aquí: " + cfg.MenuLink)
-	}
 	return sb.String()
 }

@@ -20,6 +20,22 @@ type BotConfig struct {
 	MenuLink       string   `json:"menu_link"`
 }
 
+type Product struct {
+	ID          string  `json:"id"`
+	CategoryID  *string `json:"category_id"`
+	Name        string  `json:"name"`
+	Description *string `json:"description"`
+	Price       float64 `json:"price"`
+	Available   bool    `json:"available"`
+}
+
+type CoverageZone struct {
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	DeliveryFee float64 `json:"delivery_fee"`
+	MinOrder    float64 `json:"min_order"`
+}
+
 type Tenant struct {
 	ID            string          `json:"id"`
 	Name          string          `json:"name"`
@@ -71,4 +87,57 @@ func (r *Repository) ResolveTenantByPhoneNumberID(ctx context.Context, phoneNumb
 	}
 
 	return &tenant, nil
+}
+
+func (r *Repository) GetProducts(ctx context.Context, tenantID string) ([]Product, error) {
+	rows, err := r.db.Query(ctx, db.QueryGetProducts, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var products []Product
+	for rows.Next() {
+		var p Product
+		if err := rows.Scan(
+			&p.ID,
+			&p.CategoryID,
+			&p.Name,
+			&p.Description,
+			&p.Price,
+			&p.Available,
+		); err != nil {
+			return nil, err
+		}
+		products = append(products, p)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return products, nil
+}
+
+func (r *Repository) GetCoverageZones(ctx context.Context, tenantID string) ([]CoverageZone, error) {
+	rows, err := r.db.Query(ctx, db.QueryGetCoverageZones, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var zones []CoverageZone
+	for rows.Next() {
+		var z CoverageZone
+		if err := rows.Scan(&z.ID, &z.Name, &z.DeliveryFee, &z.MinOrder); err != nil {
+			return nil, err
+		}
+		zones = append(zones, z)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return zones, nil
 }
