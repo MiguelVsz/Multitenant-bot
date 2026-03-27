@@ -470,13 +470,24 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			var rows []ListRow
 			for _, z := range zones {
 				title := z.Name
-				if len(title) > 24 { title = title[:24] }
+				if len(title) > 24 {
+					title = title[:24]
+				}
+				desc := z.Name
+				if len(desc) > 72 {
+					desc = desc[:72]
+				}
 				rows = append(rows, ListRow{
-					ID:          title, // Lo que escribirá el cliente si presiona la opción en la lista
-					Title:       title,
-					Description: "Seleccionar esta sede",
+					ID:          z.Name, // ID completo para webhook
+					Title:       title,  // Restricción de WA (24 chars)
+					Description: desc,   // Mostramos el nombre completo aquí
 				})
 			}
+			rows = append(rows, ListRow{
+				ID:          "confirm_cancel",
+				Title:       "❌ Cancelar",
+				Description: "Cancelar pedido actual",
+			})
 			sections := []ListSection{{Title: "📍 Puntos de Recogida", Rows: rows}}
 			err := SendWhatsAppList(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
 				"Elegir Sede", aiReply, "Elige una opción:", "Ver Opciones", sections)

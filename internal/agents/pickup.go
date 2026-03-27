@@ -211,6 +211,21 @@ func HandlePickup(
 					} else {
 						context["products"] += fmt.Sprintf(", %dx %s", quantity, matched.Name)
 					}
+
+					var cart []models.OrderItem
+					if cStr := context["cart"]; cStr != "" {
+						json.Unmarshal([]byte(cStr), &cart)
+					}
+					item := models.OrderItem{
+						ProductID: &matched.ID,
+						Name:      matched.Name,
+						UnitPrice: matched.Price,
+						Quantity:  quantity,
+						Subtotal:  matched.Price * float64(quantity),
+					}
+					cart = append(cart, item)
+					cartBytes, _ := json.Marshal(cart)
+					context["cart"] = string(cartBytes)
 					
 					upsellMsg := aiMsg
 					if upsellMsg == "" {
