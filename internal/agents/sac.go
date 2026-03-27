@@ -299,22 +299,42 @@ func HandleSAC(input string) string {
 			} `json:"message"`
 		} `json:"choices"`
 	}
-	var reply string
 	if err := json.Unmarshal(body, &parsed); err != nil || len(parsed.Choices) == 0 {
-		reply = ""
-	} else {
-		reply = parsed.Choices[0].Message.Content
+		return "Lo siento, el agente SAC no ha respondido en este momento. Por favor describe tu caso nuevamente o escribe 'menu principal'."
 	}
 
-	reply = strings.TrimSpace(reply)
-	if reply == "" {
-		return fmt.Sprintf(
-			"Entiendo tu solicitud de soporte: %s\n\nNo recibi una respuesta util del agente SAC. Intenta reformular tu caso o escribe menu principal para volver.",
-			input,
-		)
-	}
+	return cleanAIReply(parsed.Choices[0].Message.Content)
+}
 
-	return reply
+func cleanAIReply(reply string) string {
+	// Remover etiquetas como *VALIDACION*, *DIAGNOSTICO*, *PLAN DE ACCION*
+	tags := []string{"VALIDACION", "DIAGNOSTICO", "PLAN DE ACCION", "PLAN DE ACCIÓN"}
+	
+	lines := strings.Split(reply, "\n")
+	var cleanedLines []string
+	
+	for _, line := range lines {
+		upperLine := strings.ToUpper(line)
+		isTag := false
+		for _, tag := range tags {
+			if strings.Contains(upperLine, "*"+tag+"*") {
+				// Eliminamos la línea si es puramente diagnóstica (corta)
+				if len(line) < len(tag)+12 { 
+					isTag = true
+					break
+				}
+				// Si tiene contenido útil después del tag, limpiamos solo el tag
+				line = strings.Replace(line, "*"+tag+"*:", "", -1)
+				line = strings.Replace(line, "*"+tag+"*", "", -1)
+				line = strings.TrimSpace(line)
+			}
+		}
+		if !isTag && strings.TrimSpace(line) != "" {
+			cleanedLines = append(cleanedLines, line)
+		}
+	}
+	
+	return strings.Join(cleanedLines, "\n")
 }
 
 func resolveSACKey() string {

@@ -61,6 +61,9 @@ func HandleDelivery(
 			Message:    "¡Claro! ¿A qué dirección enviamos tu pedido?",
 			NextState:  StateDeliveryAwaitingAddress,
 			NewSession: session,
+			Buttons: []models.InteractiveButton{
+				{ID: "confirm_cancel", Title: "❌ Cancelar"},
+			},
 		}
 
 	case StateDeliveryAwaitingAddress:
@@ -70,6 +73,10 @@ func HandleDelivery(
 			Message:    fmt.Sprintf("Dirección registrada: %s. ¿Qué te gustaría pedir? (Puedes elegir algo de nuestra carta)", session.Address),
 			NextState:  StateDeliveryAwaitingProduct,
 			NewSession: session,
+			Buttons: []models.InteractiveButton{
+				{ID: "menu_1", Title: "🍕 Ver Carta"},
+				{ID: "confirm_cancel", Title: "❌ Cancelar"},
+			},
 		}
 
 	case StateDeliveryAwaitingProduct:
@@ -110,6 +117,11 @@ func HandleDelivery(
 			Message:    fmt.Sprintf("¡Excelente! He añadido %d x %s a tu pedido. %s", quantity, selected.Name, upsellSuggestion),
 			NextState:  StateDeliveryUpsell,
 			NewSession: session,
+			Buttons: []models.InteractiveButton{
+				{ID: "upsell_yes", Title: "✅ ¡Sí, genial!"},
+				{ID: "upsell_no", Title: "👎 No, gracias"},
+				{ID: "confirm_cancel", Title: "❌ Cancelar"},
+			},
 		}
 
 	case StateDeliveryUpsell:
@@ -153,6 +165,7 @@ func HandleDelivery(
 			NewSession: session,
 			Buttons: []models.InteractiveButton{
 				{ID: "confirm_ok", Title: "✅ Confirmar"},
+				{ID: "confirm_edit", Title: "✏️ Editar"},
 				{ID: "confirm_cancel", Title: "❌ Cancelar"},
 			},
 		}
@@ -181,6 +194,7 @@ func HandleDelivery(
 			Buttons: []models.InteractiveButton{
 				{ID: "pay_cash", Title: "💵 Efectivo"},
 				{ID: "pay_transfer", Title: "📲 Transferencia"},
+				{ID: "confirm_cancel", Title: "❌ Cancelar"},
 			},
 		}
 
@@ -261,7 +275,8 @@ func getUpsellSuggestion(product models.Product, _ []models.Product, _ []models.
 
 	prompt := fmt.Sprintf(`El usuario ha pedido: %s. 
 Basado en esto, sugiere un "agrandado" o complemento ideal (ej. papas mas grandes, doble carne, bebida, postre).
-Sé persuasivo pero breve. No uses más de 20 palabras.`, product.Name)
+La respuesta DEBE ser una pregunta carismática y corta (ej: "¿Te gustaría agregar una Coca-Cola fría por solo $4.500?").
+Máximo 15 palabras.`, product.Name)
 
 	reqBody, _ := json.Marshal(map[string]interface{}{
 		"model": "llama-3.3-70b-versatile",

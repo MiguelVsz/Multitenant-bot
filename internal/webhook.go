@@ -225,8 +225,10 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			}
 			session.Metadata["registration_state"] = "COMPLETED"
 			session.Metadata["customer_id"] = newCustomer.ID
-			aiReply = "¡Registro completado con éxito! Bienvenido a " + tenant.Name + ".\n\n" + buildWelcomeMessage(tenant.BotConfig)
-			return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
+			
+			// Enviar bienvenida y menú interactivo inmediatamente
+			welcomeMsg := "¡Registro completado con éxito! Bienvenido a " + tenant.Name + " 🍕"
+			return h.sendMainMenu(ctx, tenant, session, msg, welcomeMsg)
 		}
 	} else {
 		session.Metadata["customer_id"] = customer.ID
@@ -289,8 +291,10 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 				OrderType:       "delivery",
 				Status:          "pending",
 				DeliveryAddress: resp.NewSession.Address,
+				Subtotal:        resp.NewSession.Total, // Asignamos subtotal
+				DeliveryFee:     0,                     // Por ahora 0, se puede mejorar
 				Total:           resp.NewSession.Total,
-				PaymentMethod:   "not_specified", // Se podría capturar del mensaje
+				PaymentMethod:   "not_specified",
 				Items:           resp.NewSession.Cart,
 			}
 			if err := h.repo.CreateOrder(ctx, order); err != nil {
@@ -298,6 +302,7 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			}
 			delete(session.Metadata, "active_agent")
 			delete(session.Metadata, "delivery_context")
+			aiReply = "¡Orden guardada con éxito! " + aiReply
 		case agents.StateDeliveryIdle:
 			delete(session.Metadata, "active_agent")
 			delete(session.Metadata, "delivery_context")
@@ -308,6 +313,14 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		
 		// Mapeo de botones/lista a intents
 		switch textNorm {
+		case "menu_domicilio":
+			session.Metadata["active_agent"] = "delivery"
+			// Iniciar flujo de domicilio
+			delSession := &agents.DeliverySession{State: agents.StateDeliveryIdle}
+			dsBytes, _ := json.Marshal(delSession)
+			session.Metadata["delivery_context"] = string(dsBytes)
+			aiReply = "¡Excelente elección! Vamos a tomar tu pedido a domicilio. ¿A qué dirección lo enviamos?"
+			return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
 		case "menu_1":
 			route.Intent = agents.RouteIntentCarta
 		case "menu_2":
@@ -316,6 +329,14 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			route.Intent = agents.RouteIntentOrders
 		case "menu_4":
 			route.Intent = agents.RouteIntentSAC
+		case "MENU_PRINCIPAL":
+			route.Intent = agents.RouteIntentMainMenu
+		case "confirm_cancel":
+			// Resetear cualquier agente activo
+			delete(session.Metadata, "active_agent")
+			delete(session.Metadata, "delivery_context")
+			aiReply = "Entendido. He cancelado tu solicitud actual."
+			return h.sendMainMenu(ctx, tenant, session, msg, aiReply)
 		default:
 			if len(textTrim) == 1 && textTrim >= "1" && textTrim <= "4" {
 				switch textTrim {
@@ -331,33 +352,11 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 
 		switch route.Intent {
 		case agents.RouteIntentGreeting, agents.RouteIntentMainMenu:
-			// Enviar Menú Principal como Lista
-			sections := []ListSection{
-				{
-					Title: "Nuestros Servicios",
-					Rows: []ListRow{
-						{ID: "menu_1", Title: "🍕 Ver Carta", Description: "Mira nuestros productos y precios"},
-						{ID: "menu_2", Title: "📍 Sedes", Description: "Puntos de venta y cobertura"},
-						{ID: "menu_3", Title: "📦 Mis Pedidos", Description: "Estado de tus órdenes actuales"},
-						{ID: "menu_4", Title: "🎧 Soporte", Description: "Dudas, quejas o reclamos"},
-					},
-				},
-			}
-			
 			bodyText := "¡Hola! Bienvenido a " + tenant.Name + " 🍕\n¿En qué podemos ayudarte hoy?"
 			if route.Intent == agents.RouteIntentMainMenu {
 				bodyText = "¿En qué más podemos ayudarte?"
 			}
-
-			err := SendWhatsAppList(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
-				tenant.Name, bodyText, "Selecciona una opción del menú", "Ver Opciones", sections)
-			
-			if err != nil {
-				h.log.Error("failed to send menu list", "err", err)
-				aiReply = buildWelcomeMessage(tenant.BotConfig)
-				return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
-			}
-			return h.sessions.Save(ctx, session)
+			return h.sendMainMenu(ctx, tenant, session, msg, bodyText)
 
 		case agents.RouteIntentOrders:
 			records, err := h.repo.GetActiveOrdersByPhone(ctx, tenant.ID, msg.From)
@@ -428,8 +427,19 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 				for _, z := range zones {
 					sb.WriteString(fmt.Sprintf("- %s (Min. orden: $%.0f, Domicilio: $%.0f)\n", z.Name, z.MinOrder, z.DeliveryFee))
 				}
-				sb.WriteString("\nSi necesitas algo más, escribe *menu principal*.")
-				aiReply = sb.String()
+				
+				buttons := []models.InteractiveButton{
+					{ID: "MENU_PRINCIPAL", Title: "🏠 Menú Principal"},
+					{ID: "menu_domicilio", Title: "🛵 Pedir Domicilio"},
+				}
+				err := SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken, 
+					"Sedes y Cobertura", sb.String(), "", buttons)
+				
+				if err != nil {
+					h.log.Error("failed to send locations buttons", "err", err)
+					return h.finalizeMessage(ctx, tenant, session, msg, sb.String())
+				}
+				return h.sessions.Save(ctx, session)
 			}
 	case agents.RouteIntentSAC:
 			session.Metadata["active_agent"] = "sac"
@@ -464,7 +474,39 @@ func (h *WebhookHandler) finalizeMessage(ctx context.Context, tenant *models.Ten
 	return h.sessions.Save(ctx, session)
 }
 
+func (h *WebhookHandler) sendMainMenu(ctx context.Context, tenant *models.Tenant, session *ConversationSession, msg IncomingMessage, bodyText string) error {
+	sections := []ListSection{
+		{
+			Title: "Menú Don Pepe",
+			Rows: []ListRow{
+				{ID: "menu_domicilio", Title: "🏠 Pedido a Domicilio", Description: "Haz tu pedido y recíbelo en casa"},
+				{ID: "menu_1", Title: "🍕 Ver Carta Interactiva", Description: "Mira nuestros productos y combos"},
+				{ID: "menu_2", Title: "📍 Sedes y Cobertura", Description: "Nuestros puntos físicos"},
+				{ID: "menu_3", Title: "📦 Mis Órdenes", Description: "Estado de tus pedidos actuales"},
+				{ID: "menu_4", Title: "🎧 Soporte (PQR)", Description: "Ayuda, quejas o sugerencias"},
+			},
+		},
+	}
+
+	err := SendWhatsAppList(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
+		tenant.Name, bodyText, "Selecciona una opción", "Ver Menú 📋", sections)
+	
+	if err != nil {
+		h.log.Error("failed to send menu list", "err", err)
+		aiReply := bodyText + "\n\n1. 🍕 Carta\n2. 📍 Sedes\n3. 📦 Pedidos\n4. 🎧 Soporte"
+		return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
+	}
+
+	session.History = append(session.History, models.AIMessage{
+		Role:    "assistant",
+		Content: bodyText + " [Interactive Menu]",
+	})
+	return h.sessions.Save(ctx, session)
+}
+
 func buildWelcomeMessage(cfg models.BotConfig) string {
+	// ... (no se toca, se mantiene por fallback si falla la lista)
+
 	var sb strings.Builder
 	
 	if cfg.WelcomeMessage != "" {
