@@ -6,11 +6,24 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var schemaMigrations = []string{}
+var Pool *pgxpool.Pool
 
-func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
+var schemaMigrations = []string{
+	// Aquí pueden ir las tablas que necesiten
+	`CREATE TABLE IF NOT EXISTS gobot.users (
+        id SERIAL PRIMARY KEY,
+        phone TEXT UNIQUE,
+        rid TEXT,
+        name TEXT,
+        tenant_id TEXT
+    );`,
+}
+
+func EnsureSchema(ctx context.Context, p *pgxpool.Pool) error {
+	Pool = p
+
 	for _, stmt := range schemaMigrations {
-		if _, err := pool.Exec(ctx, stmt); err != nil {
+		if _, err := Pool.Exec(ctx, stmt); err != nil {
 			return err
 		}
 	}

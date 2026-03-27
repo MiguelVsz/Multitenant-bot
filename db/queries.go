@@ -11,3 +11,14 @@ SELECT id, name, whatsapp_phone_id, integration_type, integration_config, create
 FROM gobot.tenants
 WHERE whatsapp_phone_id = $1`
 )
+const (
+	QueryResolveUserByPhone = `
+SELECT external_id, id, name, email 
+FROM gobot.customers 
+WHERE whatsapp_phone = $1 AND tenant_id = $2`
+
+	QueryUpdateUserRID = `
+UPDATE gobot.customers 
+SET external_id = $1, updated_at = NOW() 
+WHERE id = $2`
+)

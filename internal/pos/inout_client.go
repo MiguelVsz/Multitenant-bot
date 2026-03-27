@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url" // <--- ESTE ES EL QUE FALTABA PARA EL ESCAPED_ID
 	"os"
 	"time"
 )
@@ -37,7 +38,6 @@ func NewInOutClient() *InOutClient {
 
 // 4. Función para obtener las tiendas (Get)
 func (c *InOutClient) GetPointSales() ([]string, error) {
-	// Construimos la URL con el BusinessID
 	url := fmt.Sprintf("%s/point-sales?business=%s", c.BaseURL, c.BusinessID)
 
 	fmt.Printf("[DEBUG] Consultando tiendas en: %s\n", url)
@@ -52,38 +52,68 @@ func (c *InOutClient) GetPointSales() ([]string, error) {
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		fmt.Printf("[ERROR] Error de red: %v\n", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	fmt.Printf("[DEBUG] Respuesta API PointSales: %d %s\n", resp.StatusCode, resp.Status)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("error en API: %s", resp.Status)
 	}
 
-	// TRUCO: Decodificamos como una lista directa []InOutStore
 	var storesData []InOutStore
 	if err := json.NewDecoder(resp.Body).Decode(&storesData); err != nil {
-		fmt.Printf("[ERROR] Error decodificando JSON: %v\n", err)
 		return nil, err
 	}
 
-	// Extraemos los nombres para el bot
 	var names []string
 	for _, s := range storesData {
 		names = append(names, s.Name)
 	}
 
-	fmt.Printf("[DEBUG] Tiendas cargadas: %d\n", len(names))
 	return names, nil
 }
 
-// 5. Función para actualizar usuario (Patch)
+// 5. Función para buscar el ID real del usuario por su teléfono
+func (c *InOutClient) GetUserIDByPhone(phone string) (string, error) {
+	url := fmt.Sprintf("%s/users?business=%s&search=%s", c.BaseURL, c.BusinessID, phone)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Data []struct {
+			ID string `json:"rid"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+
+	if len(result.Data) > 0 {
+		return result.Data[0].ID, nil // El RID real que vimos en Postman
+	}
+
+	return "", fmt.Errorf("usuario no encontrado")
+}
+
+// 6. Función para actualizar usuario (Patch) con ID Escapado
 func (c *InOutClient) UpdateUser(userID string, data map[string]interface{}) error {
-	url := fmt.Sprintf("%s/users/%s", c.BaseURL, userID)
-	fmt.Printf("[DEBUG] Intentando PATCH en: %s con datos: %v\n", url, data)
+	// IMPORTANTE: Convierte símbolos como # o : para que la URL no se rompa
+	escapedID := url.PathEscape(userID)
+
+	url := fmt.Sprintf("%s/users/%s?business=%s", c.BaseURL, escapedID, c.BusinessID)
+
+	fmt.Printf("[DEBUG] Intentando PATCH en: %s\n", url)
 
 	jsonData, err := json.Marshal(data)
 	if err != nil {
@@ -100,7 +130,6 @@ func (c *InOutClient) UpdateUser(userID string, data map[string]interface{}) err
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		fmt.Printf("[ERROR] Fallo en PATCH: %v\n", err)
 		return err
 	}
 	defer resp.Body.Close()
@@ -112,37 +141,4 @@ func (c *InOutClient) UpdateUser(userID string, data map[string]interface{}) err
 	}
 
 	return nil
-}
-func (c *InOutClient) GetUserIDByPhone(phone string) (string, error) {
-	// Consultamos la lista de usuarios filtrando por teléfono
-	url := fmt.Sprintf("%s/users?business=%s&search=%s", c.BaseURL, c.BusinessID, phone)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	// Estructura temporal para leer la respuesta de la lista de usuarios
-	var result struct {
-		Data []struct {
-			ID string `json:"rid"`
-		} `json:"data"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-
-	if len(result.Data) > 0 {
-		return result.Data[0].ID, nil // Devolvemos el RID real
-	}
-
-	return "", fmt.Errorf("usuario no encontrado")
 }
