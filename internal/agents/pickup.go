@@ -3,7 +3,9 @@ package agents
 import (
 	"encoding/json"
 	"fmt"
+	"multi-tenant-bot/db"
 	"multi-tenant-bot/internal/pos"
+	"strings"
 )
 
 const SystemPromptPickup = `Eres el asistente de WhatsApp para recogida en tienda.
@@ -27,7 +29,6 @@ const (
 	StatePickupConfirming      = "PICKUP_CONFIRMING"
 )
 
-// PickupResponse define la estructura de lo que devuelve la función
 type PickupResponse struct {
 	Message    string
 	NextState  string
@@ -53,7 +54,7 @@ func HandlePickup(userInput string, currentState string, currentContext string) 
 		context["city"] = userInput
 		stores, err := api.GetPointSales()
 		if err != nil || len(stores) == 0 {
-			res.Message = "Lo siento, hubo un problema al consultar nuestras tiendas. Por favor, intenta de nuevo en unos minutos."
+			res.Message = "Lo siento, hubo un problema al consultar nuestras tiendas. Intenta de nuevo en unos minutos."
 			res.NextState = "IDLE"
 			return res
 		}
@@ -67,31 +68,88 @@ func HandlePickup(userInput string, currentState string, currentContext string) 
 		res.NextState = StatePickupAwaitingStore
 
 	case StatePickupAwaitingStore:
-		context["store"] = userInput // Guardamos el punto elegido
-		// PASO 6: Enviar URL del menú (Simulada por ahora)
-		res.Message = fmt.Sprintf("Perfecto, punto seleccionado: %s.\n\n Puedes ver nuestro menú aquí: https://menu.inoutdelivery.com/dlk\n\n¿Qué productos deseas ordenar? (Escríbelos aquí)", userInput)
+		stores, err := api.GetPointSales()
+		if err != nil {
+			res.Message = "Error al consultar las tiendas."
+			return res
+		}
+
+		var selectedStoreName string
+		var index int
+		_, errScan := fmt.Sscanf(userInput, "%d", &index)
+
+		if errScan == nil && index > 0 && index <= len(stores) {
+			selectedStoreName = stores[index-1]
+		} else {
+			selectedStoreName = userInput
+		}
+
+		context["store"] = selectedStoreName
+
+		products, err := api.GetProducts()
+		if err != nil || len(products) == 0 {
+			res.Message = fmt.Sprintf("Punto seleccionado: %s.\n\nVe nuestro menú: https://menu.inoutdelivery.com/dlk\n\n¿Qué deseas ordenar?", selectedStoreName)
+		} else {
+			msg := fmt.Sprintf("Punto seleccionado: %s.\n\n📋 *Menú:*\n\n", selectedStoreName)
+			for i, p := range products {
+				if i >= 20 {
+					msg += fmt.Sprintf("...y %d productos más en: https://menu.inoutdelivery.com/dlk\n", len(products)-20)
+					break
+				}
+				msg += fmt.Sprintf("%d. %s\n", i+1, p.Name)
+			}
+			msg += "\n¿Qué productos deseas ordenar?"
+			res.Message = msg
+		}
 		res.NextState = StatePickupAwaitingProduct
 
 	case StatePickupAwaitingProduct:
-		context["products"] = userInput
-		// PASO 7: Upselling (Recomendar algo más)
-		res.Message = fmt.Sprintf("¡Excelente elección con '%s'! 🍔\n\n¿Te gustaría agrandar tu combo o añadir unas papas medianas por solo $5.900 adicionales? (Responde Sí/No)", userInput)
+		products, err := api.GetProducts()
+		if err != nil {
+			res.Message = "Error al obtener productos"
+			return res
+		}
+
+		var selectedProductName string
+		var index int
+		_, errScan := fmt.Sscanf(userInput, "%d", &index)
+
+		if errScan == nil && index > 0 && index <= len(products) {
+			selectedProductName = products[index-1].Name
+		} else {
+			selectedProductName = userInput
+		}
+		context["products"] = selectedProductName
+
+		res.Message = fmt.Sprintf("¡Excelente elección con '%s'! 🍔\n\n¿Te gustaría agrandar tu combo...?", selectedProductName)
 		res.NextState = StatePickupConfirming
 
 	case StatePickupConfirming:
-		// PASO 8 & 9: Resumen y Link de Pago
 		upsell := "Sin adicionales"
 		if userInput == "si" || userInput == "Si" || userInput == "SI" {
 			upsell = "Combo Agrandado"
 		}
-
 		res.Message = fmt.Sprintf("📝 *Resumen de tu pedido:*\n- Tienda: %s\n- Ciudad: %s\n- Productos: %s\n- Adicional: %s\n\nTotal estimado: $24.900\n\n¿Confirmas tu pedido para generar el link de pago? (Responde CONFIRMAR)",
 			context["store"], context["city"], context["products"], upsell)
 		res.NextState = "AWAITING_PAYMENT_LINK"
 
 	case "AWAITING_PAYMENT_LINK":
-		if userInput == "confirmar" || userInput == "CONFIRMAR" {
-			// PASO 10: Simulación de link de pago y guardado
+		if strings.TrimSpace(strings.ToLower(userInput)) == "confirmar" {
+			var orderID string
+			err := db.DB.QueryRow(db.QueryInsertOrder,
+				"ed2a4366-a42e-4043-a1ee-0a72cf897683",
+				"",
+				context["store"],
+				context["city"],
+				context["products"],
+			).Scan(&orderID)
+
+			if err != nil {
+				fmt.Printf("[DEBUG] Error guardando pedido: %v\n", err)
+			} else {
+				fmt.Printf("[DEBUG] Pedido guardado con ID: %s\n", orderID)
+			}
+
 			res.Message = "✅ ¡Pedido confirmado! Aquí tienes tu link de pago seguro: https://pagos.inout.com/ref123\n\nTu pedido quedará con estado 'Pendiente de Pago' hasta que completes la transacción. ¡Gracias por elegirnos!"
 			res.NextState = "FINISHED"
 		} else {
