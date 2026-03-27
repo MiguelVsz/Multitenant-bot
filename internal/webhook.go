@@ -406,10 +406,11 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			}
 		}
 
-		// Obtener zonas de cobertura de la BD para el agente pickup
+		// Obtener zonas y productos de la BD para el agente pickup
 		zones, _ := h.repo.GetCoverageZones(ctx, tenant.ID)
+		pickProducts, _ := h.repo.GetProducts(ctx, tenant.ID)
 		pickState, _ := session.Metadata["pickup_state"].(string)
-		resp := agents.HandlePickup(msg.Text, pickState, mustMarshalContext(pickSession), zones)
+		resp := agents.HandlePickup(msg.Text, pickState, mustMarshalContext(pickSession), zones, pickProducts)
 
 		aiReply = resp.Message
 		session.Metadata["pickup_state"] = resp.NextState
@@ -726,7 +727,8 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 				initCtx["customer_id"] = cid
 			}
 			pickZones, _ := h.repo.GetCoverageZones(ctx, tenant.ID)
-			resp := agents.HandlePickup("", "IDLE", mustMarshalContext(initCtx), pickZones)
+			pickProds, _ := h.repo.GetProducts(ctx, tenant.ID)
+			resp := agents.HandlePickup("", "IDLE", mustMarshalContext(initCtx), pickZones, pickProds)
 			aiReply = resp.Message
 			session.Metadata["pickup_state"] = resp.NextState
 			pkBytes, _ := json.Marshal(resp.NewContext)

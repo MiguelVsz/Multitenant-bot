@@ -209,7 +209,7 @@ func applyDelivery(session *consoleSession, input string) string {
 }
 
 func applyPickup(session *consoleSession, input string) string {
-	resp := HandlePickup(input, session.CurrentState, session.CurrentContext, []models.CoverageZone{})
+	resp := HandlePickup(input, session.CurrentState, session.CurrentContext, []models.CoverageZone{}, []models.Product{})
 	session.CurrentState = resp.NextState
 	session.CurrentContext = mustMarshalContext(resp.NewContext)
 
