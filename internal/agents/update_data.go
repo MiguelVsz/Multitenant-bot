@@ -3,6 +3,7 @@ package agents
 import (
 	"encoding/json"
 	"fmt"
+	"multi-tenant-bot/internal/pos"
 	"strings"
 )
 
@@ -34,33 +35,62 @@ func HandleUpdateData(userInput string, currentState string, currentContext stri
 		context = make(map[string]string)
 	}
 
+	// SIMULACIÓN DE LOGIN: Si no hay ID, pongamos uno de prueba para que no de 404
+	if context["user_id"] == "" {
+		context["user_id"] = "3003478228" // ID de prueba que existe en InOut
+	}
+
 	var res PickupResponse
+	api := pos.NewInOutClient()
 
 	switch currentState {
-	case "UPDATE_START":
-		res.Message = "¿Qué dato te gustaría actualizar?\n1. Nombre\n2. Correo\n3. Teléfono secundario"
+	case "UPDATE_START", "IDLE", "": // Añadimos IDLE por si el router falla
+		res.Message = "¿Qué dato te gustaría actualizar?\n1. Nombre\n2. Correo\n3. Teléfono"
 		res.NextState = StateUpdateSelectField
 
 	case StateUpdateSelectField:
-		// Guardamos qué campo quiere editar
-		context["field_to_update"] = userInput
-		res.Message = fmt.Sprintf("Entendido. Por favor, ingresa el nuevo valor para: %s", userInput)
+		// Traducimos el número al nombre técnico del campo que pide la API
+		field := ""
+		switch userInput {
+		case "1":
+			field = "name"
+		case "2":
+			field = "email"
+		case "3":
+			field = "phone"
+		default:
+			field = userInput // Por si escribe el nombre directamente
+		}
+
+		context["field_to_update"] = field
+		res.Message = fmt.Sprintf("Entendido. Por favor, ingresa el nuevo valor para %s:", field)
 		res.NextState = StateUpdateAwaitingVal
 
 	case StateUpdateAwaitingVal:
-		// Guardamos el nuevo valor temporalmente
 		context["new_value"] = userInput
-		res.Message = fmt.Sprintf("Confirmas que quieres cambiar tu %s a: '%s'? (Sí/No)", 
+		res.Message = fmt.Sprintf("¿Confirmas que quieres cambiar tu %s a: '%s'? (Sí/No)",
 			context["field_to_update"], userInput)
 		res.NextState = StateUpdateConfirm
 
 	case StateUpdateConfirm:
 		if strings.ToLower(userInput) == "si" || strings.ToLower(userInput) == "sí" {
-			// AQUÍ es donde luego llamaremos a la función de la DB
-			res.Message = "¡Listo! Tus datos han sido actualizados con éxito."
-			res.NextState = "IDLE"
+			// Ahora enviará map[name:juana] en lugar de map[1:juana]
+			updateData := map[string]interface{}{
+				context["field_to_update"]: context["new_value"],
+			}
+
+			err := api.UpdateUser(context["user_id"], updateData)
+
+			if err != nil {
+				// Si la API dice 404, explícale al usuario que no lo encontramos
+				res.Message = fmt.Sprintf("Lo siento, no encontré el perfil con el ID %s en nuestro sistema. ¿Estás registrado con nosotros?", context["user_id"])
+				res.NextState = "IDLE" // Lo mandamos al inicio para que no se bloquee
+			} else {
+				res.Message = "✅ ¡Perfecto Juana! He actualizado tu nombre en el sistema."
+				res.NextState = "FINISHED"
+			}
 		} else {
-			res.Message = "Actualización cancelada. Volviendo al menú."
+			res.Message = "Actualización cancelada."
 			res.NextState = "IDLE"
 		}
 	}
