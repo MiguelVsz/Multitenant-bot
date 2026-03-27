@@ -108,7 +108,7 @@ func HandleDelivery(
 		session.Address = userInput
 		session.State = StateDeliveryAwaitingProduct
 		return &DeliveryResponse{
-			Message:    fmt.Sprintf("Dirección registrada: %s. ¿Qué te gustaría pedir? (Puedes elegir algo de nuestra carta)", session.Address),
+			Message:    fmt.Sprintf("✅ Dirección guardada: *%s*\n\n¿Qué te gustaría pedir? Escribe el nombre del producto o mira nuestra carta.", session.Address),
 			NextState:  StateDeliveryAwaitingProduct,
 			NewSession: session,
 			Buttons: []models.InteractiveButton{
@@ -118,6 +118,14 @@ func HandleDelivery(
 		}
 
 	case StateDeliveryAwaitingProduct:
+		// Interceptar cancelaciones y comandos de menú directamente
+		if textNorm == "confirm_cancel" || strings.HasPrefix(textNorm, "menu_") {
+			return &DeliveryResponse{
+				Message:   "",
+				NextState: StateDeliveryIdle,
+				NewSession: &DeliverySession{State: StateDeliveryIdle},
+			}
+		}
 		// IA para identificar producto — limitar historial para evitar confusión con la carta
 		recentHistory := history
 		if len(recentHistory) > 6 {
@@ -126,9 +134,13 @@ func HandleDelivery(
 		productName, quantity, found := pickProductWithAI(userInput, products, recentHistory, apiKey)
 		if !found {
 			return &DeliveryResponse{
-				Message:    "No logré identificar qué producto deseas. ¿Me lo podrías repetir, por favor?",
+				Message:    "No logré identificar ese producto en nuestra carta. ¿Podrías escribir el nombre exactamente como aparece en la carta?",
 				NextState:  StateDeliveryAwaitingProduct,
 				NewSession: session,
+				Buttons: []models.InteractiveButton{
+					{ID: "menu_1", Title: "🍕 Ver Carta"},
+					{ID: "confirm_cancel", Title: "❌ Cancelar"},
+				},
 			}
 		}
 

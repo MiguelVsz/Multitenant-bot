@@ -182,10 +182,10 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 	if customer != nil {
 		session.Metadata["customer_id"] = customer.ID
 		session.Metadata["customer_name"] = customer.Name
-		if val, ok := customer.Metadata["data_treatment_accepted"].(string); ok {
+		if val, ok := customer.Metadata["data_treatment_accepted"].(string); ok && val != "" {
 			session.Metadata["data_treatment_accepted"] = val
 		}
-		if val, ok := customer.Metadata["address"].(string); ok {
+		if val, ok := customer.Metadata["address"].(string); ok && val != "" {
 			session.Metadata["customer_address"] = val
 		}
 	}
@@ -311,7 +311,12 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			delete(session.Metadata, "active_agent")
 		}
 	case "sac":
-		aiReply = agents.HandleSAC(msg.Text)
+		// Ignorar comandos de sistema que no son mensajes reales del usuario
+		if textNorm == "" || strings.HasPrefix(textNorm, "menu_") || textNorm == "confirm_cancel" {
+			aiReply = "🎧 *Soporte y PQR*\n\nEstoy aquí para ayudarte. Por favor cuéntame: ¿Cuál es tu consulta, queja o sugerencia?"
+		} else {
+			aiReply = agents.HandleSAC(msg.Text)
+		}
 	case "delivery":
 		var delSession agents.DeliverySession
 		if dsVal := session.Metadata["delivery_context"]; dsVal != nil {
@@ -322,9 +327,11 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		delSession.PhoneNumber = msg.From
 		delSession.CustomerID, _ = session.Metadata["customer_id"].(string)
 
-		// Proporcionar dirección registrada si existe para el flujo de confirmación
-		if session.Metadata["customer_address"] != nil {
-			delSession.Address, _ = session.Metadata["customer_address"].(string)
+		// Solo inyectar dirección registrada si NO está ya en el contexto de entrega
+		if delSession.Address == "" {
+			if addr, ok := session.Metadata["customer_address"].(string); ok && addr != "" {
+				delSession.Address = addr
+			}
 		}
 
 		products, _ := h.repo.GetProducts(ctx, tenant.ID)
@@ -369,6 +376,10 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		case agents.StateDeliveryIdle:
 			delete(session.Metadata, "active_agent")
 			delete(session.Metadata, "delivery_context")
+			// Si el agente canceló internamente (sin mensaje), ir al menú principal
+			if aiReply == "" {
+				return h.sendMainMenu(ctx, tenant, session, msg, "Pedido cancelado. ¿En qué más podemos ayudarte?")
+			}
 		}
 	case "pickup":
 		var pickSession map[string]string
