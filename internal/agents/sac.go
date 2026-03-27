@@ -103,13 +103,14 @@ func cleanAIReply(reply string) string {
 			}
 		}
 
-		// 2. Filtro heurístico para líneas que no parecen ser para el cliente
+	// Filtros adicionales para líneas con radicados
 		if !isInternal {
-			if strings.HasPrefix(upperLine, "SELECCIONO") || 
-			   strings.HasPrefix(upperLine, "FALTA INFORMACIÓN") || 
+			if strings.HasPrefix(upperLine, "SELECCIONO") ||
+			   strings.HasPrefix(upperLine, "FALTA INFORMACIÓN") ||
 			   strings.HasPrefix(upperLine, "FALTA INFORMACION") ||
 			   strings.Contains(upperLine, "RADICADO:") ||
-			   strings.Contains(upperLine, "TIEMPO DE RESPUESTA:") {
+			   strings.Contains(upperLine, "TIEMPO DE RESPUESTA:") ||
+			   strings.Contains(upperLine, "#SAC") {
 				isInternal = true
 			}
 		}
@@ -140,9 +141,12 @@ func sacBusinessType() string {
 }
 
 func sacSystemPrompt(tipoDeNegocio string) string {
-	return fmt.Sprintf(`Eres un Especialista de SAC para una empresa de %s.
-Responde de forma tecnica, resolutiva y directa. 
-NO uses encabezados como VALIDACION, DIAGNOSTICO o PLAN DE ACCION. 
-Solo el mensaje final para el cliente.
-Máximo 300 caracteres.`, tipoDeNegocio)
+	return fmt.Sprintf(`Eres el Especialista de Soporte al Cliente (SAC) de una empresa de %s.
+
+REGLAS ESTRICTAS:
+- Si el mensaje del usuario está vacío, saluda cordialmente, preséntate como soporte y pregunta en qué puedes ayudar. Máximo 2 oraciones.
+- Si el usuario tiene una queja, reclamo o sugerencia, responde de forma empática, directa y ofrece una solución concreta.
+- Responde SOLO el mensaje final para el cliente. NO incluyas encabezados internos como VALIDACION, DIAGNOSTICO, PLAN DE ACCION, RADICADO o TIEMPO DE RESPUESTA.
+- Tono: profesional, cálido y resolutivo.
+- Máximo 250 caracteres por respuesta.`, tipoDeNegocio)
 }

@@ -26,12 +26,13 @@ const (
 )
 
 type DeliverySession struct {
-	State       string             `json:"state"`
-	Address     string             `json:"address,omitempty"`
-	Cart        []models.OrderItem `json:"cart"`
-	PhoneNumber string             `json:"phone_number"`
-	CustomerID  string             `json:"customer_id"`
-	Total       float64            `json:"total"`
+	State         string             `json:"state"`
+	Address       string             `json:"address,omitempty"`
+	Cart          []models.OrderItem `json:"cart"`
+	PhoneNumber   string             `json:"phone_number"`
+	CustomerID    string             `json:"customer_id"`
+	Total         float64            `json:"total"`
+	SuggestedItem *models.Product    `json:"suggested_item,omitempty"`
 }
 
 type DeliveryResponse struct {
@@ -117,8 +118,12 @@ func HandleDelivery(
 		}
 
 	case StateDeliveryAwaitingProduct:
-		// IA para identificar producto
-		productName, quantity, found := pickProductWithAI(userInput, products, history, apiKey)
+		// IA para identificar producto — limitar historial para evitar confusión con la carta
+		recentHistory := history
+		if len(recentHistory) > 6 {
+			recentHistory = recentHistory[len(recentHistory)-6:]
+		}
+		productName, quantity, found := pickProductWithAI(userInput, products, recentHistory, apiKey)
 		if !found {
 			return &DeliveryResponse{
 				Message:    "No logré identificar qué producto deseas. ¿Me lo podrías repetir, por favor?",
@@ -148,10 +153,18 @@ func HandleDelivery(
 
 		// Estado de Upsell (Sugerencia de agrandado)
 		session.State = StateDeliveryUpsell
-		upsellSuggestion := getUpsellSuggestion(selected, products, history, apiKey)
+		suggested := getUpsellSuggestion(selected, products, history, apiKey)
+		session.SuggestedItem = suggested
 		
+		msg := fmt.Sprintf("¡Excelente! He añadido %d x %s a tu pedido. ", quantity, selected.Name)
+		if suggested != nil {
+			msg += fmt.Sprintf("¿Te gustaría acompañarlo con %s por solo $%.0f adicionales?", suggested.Name, suggested.Price)
+		} else {
+			msg += "¿Deseas algo más?"
+		}
+
 		return &DeliveryResponse{
-			Message:    fmt.Sprintf("¡Excelente! He añadido %d x %s a tu pedido. %s", quantity, selected.Name, upsellSuggestion),
+			Message:    msg,
 			NextState:  StateDeliveryUpsell,
 			NewSession: session,
 			Buttons: []models.InteractiveButton{
@@ -162,35 +175,18 @@ func HandleDelivery(
 		}
 
 	case StateDeliveryUpsell:
-		if textNorm == "upsell_yes" || isPositive(userInput) {
-			// Intentar extraer el producto sugerido del historial o un campo en sesión
-			// Por ahora, como es stateless la IA de upsell, usaremos una IA rápida para extraer qué se ofreció
-			sugerencia := ""
-			for i := len(history) - 1; i >= 0; i-- {
-				if history[i].Role == "assistant" {
-					sugerencia = history[i].Content
-					break
-				}
+		upsellAccepted := textNorm == "upsell_yes" || textNorm == "upsell yes" || isPositive(userInput)
+		if upsellAccepted && session.SuggestedItem != nil {
+			item := models.OrderItem{
+				ProductID: &session.SuggestedItem.ID,
+				Name:      session.SuggestedItem.Name,
+				UnitPrice: session.SuggestedItem.Price,
+				Quantity:  1,
+				Subtotal:  session.SuggestedItem.Price,
 			}
-			prodName, qty, found := pickProductWithAI(sugerencia, products, nil, apiKey)
-			if found {
-				var selected models.Product
-				for _, p := range products {
-					if strings.EqualFold(p.Name, prodName) {
-						selected = p
-						break
-					}
-				}
-				item := models.OrderItem{
-					ProductID: &selected.ID,
-					Name:      selected.Name,
-					UnitPrice: selected.Price,
-					Quantity:  qty,
-					Subtotal:  selected.Price * float64(qty),
-				}
-				session.Cart = append(session.Cart, item)
-				session.Total += item.Subtotal
-			}
+			session.Cart = append(session.Cart, item)
+			session.Total += item.Subtotal
+			session.SuggestedItem = nil // Limpiar sugerencia ya usada
 		}
 		
 		session.State = StateDeliveryConfirmingOrder
@@ -332,20 +328,36 @@ Si no encuentras el producto, responde {"found": false}`, productList)
 	return data.Product, data.Quantity, data.Found
 }
 
-func getUpsellSuggestion(product models.Product, _ []models.Product, _ []models.AIMessage, apiKey string) string {
-	if apiKey == "" { return "¿Deseas agregar alguna bebida?" }
+func getUpsellSuggestion(selected models.Product, products []models.Product, _ []models.AIMessage, apiKey string) *models.Product {
+	if apiKey == "" { return nil }
 
-	prompt := fmt.Sprintf(`El usuario ha pedido: %s. 
-Basado en esto, sugiere un "agrandado" o complemento ideal (ej. papas mas grandes, doble carne, bebida, postre).
-La respuesta DEBE ser una pregunta carismática y corta (ej: "¿Te gustaría agregar una Coca-Cola fría por solo $4.500?").
-Máximo 15 palabras.`, product.Name)
+	// Buscar productos que NO sean el actual y que su precio sea razonable para un upsell (ej. < $15.000)
+	var candidates []models.Product
+	for _, p := range products {
+		if p.ID != selected.ID && p.Available && p.Price < 15000 {
+			candidates = append(candidates, p)
+		}
+	}
+
+	if len(candidates) == 0 { return nil }
+
+	// Usar IA para elegir el mejor candidato
+	candidateList := ""
+	for i, c := range candidates {
+		candidateList += fmt.Sprintf("%d. %s ($%.0f)\n", i, c.Name, c.Price)
+	}
+
+	prompt := fmt.Sprintf(`El usuario pidió: %s. 
+De esta lista, ¿cuál es el MEJOR acompañamiento o "agrandado"? 
+Responde SOLO con el número del índice.
+%s`, selected.Name, candidateList)
 
 	reqBody, _ := json.Marshal(map[string]interface{}{
-		"model": "llama-3.3-70b-versatile",
+		"model": "llama-3.1-8b-instant",
 		"messages": []map[string]string{{"role": "system", "content": prompt}},
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.groq.com/openai/v1/chat/completions", bytes.NewReader(reqBody))
@@ -353,7 +365,7 @@ Máximo 15 palabras.`, product.Name)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != 200 { return "¿Deseas algo más para acompañar?" }
+	if err != nil || resp.StatusCode != 200 { return &candidates[0] }
 	defer resp.Body.Close()
 
 	var res struct {
@@ -365,13 +377,18 @@ Máximo 15 palabras.`, product.Name)
 	}
 	json.NewDecoder(resp.Body).Decode(&res)
 
-	return res.Choices[0].Message.Content
+	if len(res.Choices) == 0 { return &candidates[0] }
+	idx := 0
+	fmt.Sscanf(strings.TrimSpace(res.Choices[0].Message.Content), "%d", &idx)
+	if idx < 0 || idx >= len(candidates) { idx = 0 }
+
+	return &candidates[idx]
 }
 
 func renderCart(cart []models.OrderItem) string {
 	var items []string
 	for _, item := range cart {
-		items = append(items, fmt.Sprintf("%d x %s", item.Quantity, item.Name))
+		items = append(items, fmt.Sprintf("%d x %s ($%.0f)", item.Quantity, item.Name, item.Subtotal))
 	}
 	return strings.Join(items, ", ")
 }
@@ -382,11 +399,26 @@ func resolveAPIKey() string {
 }
 
 func isPositive(msg string) bool {
-	s := strings.ToLower(msg)
-	return strings.Contains(s, "si") || strings.Contains(s, "ok") || strings.Contains(s, "vale") || strings.Contains(s, "acepto")
+	s := strings.ToLower(strings.TrimSpace(msg))
+	positiveExact := []string{"si", "sí", "ok", "vale", "claro", "acepto", "perfecto", "listo", "dale", "upsell_yes", "upsell yes"}
+	for _, w := range positiveExact {
+		if s == w {
+			return true
+		}
+	}
+	// Verificar como palabra completa al inicio o fin
+	return strings.HasPrefix(s, "si ") || strings.HasPrefix(s, "sí ") ||
+		strings.HasSuffix(s, " si") || strings.HasSuffix(s, " sí")
 }
 
 func isNegative(msg string) bool {
-	s := strings.ToLower(msg)
-	return strings.Contains(s, "no") || strings.Contains(s, "cancelar")
+	s := strings.ToLower(strings.TrimSpace(msg))
+	negativeExact := []string{"no", "nel", "nop", "nope", "upsell_no", "upsell no"}
+	for _, w := range negativeExact {
+		if s == w {
+			return true
+		}
+	}
+	return strings.HasPrefix(s, "no ") || strings.HasSuffix(s, " no") ||
+		strings.Contains(s, "cancelar") || strings.Contains(s, "no gracias")
 }

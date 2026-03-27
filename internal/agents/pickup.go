@@ -4,27 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"multi-tenant-bot/internal/pos"
+	"strings"
 )
-
-const SystemPromptPickup = `Eres el asistente de WhatsApp para recogida en tienda.
-Sigue este flujo de forma estricta, sin improvisar pasos:
-
-1. Muestra ciudades disponibles (Por ahora solo Bogotá).
-2. Usuario elige ciudad.
-3. Muestra puntos de recogida.
-4. Usuario elige punto (si no es válido, vuelve al paso 3).
-5. Confirma nombre y dirección del punto.
-6. Envía URL del menú.
-7. Recibe selección + recomienda productos adicionales (upselling).
-8. Muestra resumen y pide confirmación (si no confirma, cancela).
-9. Envía link de pago.
-10. Guarda pedido con estado 'pendiente de pago'.`
 
 const (
 	StatePickupAwaitingCity    = "PICKUP_AWAITING_CITY"
 	StatePickupAwaitingStore   = "PICKUP_AWAITING_STORE"
+	StatePickupConfirmingStore = "PICKUP_CONFIRMING_STORE"
 	StatePickupAwaitingProduct = "PICKUP_AWAITING_PRODUCT"
+	StatePickupUpsell          = "PICKUP_UPSELL"
 	StatePickupConfirming      = "PICKUP_CONFIRMING"
+	StatePickupAwaitingPayment = "PICKUP_AWAITING_PAYMENT"
 )
 
 // PickupResponse define la estructura de lo que devuelve la función
@@ -46,56 +36,90 @@ func HandlePickup(userInput string, currentState string, currentContext string) 
 
 	switch currentState {
 	case "IDLE", "":
-		res.Message = "¡Claro! Por favor, dime en qué ciudad te encuentras para ver los puntos de recogida."
+		res.Message = "🥡 *Recoger en Tienda*\n━━━━━━━━━━━━━━━━\n\n¡Perfecto! Dime en qué *ciudad* te encuentras para mostrarte los puntos de recogida disponibles."
 		res.NextState = StatePickupAwaitingCity
 
 	case StatePickupAwaitingCity:
 		context["city"] = userInput
 		stores, err := api.GetPointSales()
 		if err != nil || len(stores) == 0 {
-			res.Message = "Lo siento, hubo un problema al consultar nuestras tiendas. Por favor, intenta de nuevo en unos minutos."
+			res.Message = "Lo siento, hubo un problema al consultar nuestras tiendas. Por favor intenta de nuevo en unos minutos."
 			res.NextState = "IDLE"
+			res.NewContext = context
 			return res
 		}
 
-		msg := fmt.Sprintf("Perfecto, en %s tenemos estos puntos disponibles:\n\n", userInput)
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("🏪 Puntos de recogida en *%s*:\n", userInput))
+		sb.WriteString("─────────────────────\n\n")
 		for i, name := range stores {
-			msg += fmt.Sprintf("%d. %s\n", i+1, name)
+			sb.WriteString(fmt.Sprintf("%d️⃣ %s\n", i+1, name))
 		}
-		msg += "\n¿En cuál de ellos quieres recoger tu pedido?"
-		res.Message = msg
+		sb.WriteString("\n¿En cuál punto deseas recoger tu pedido?")
+		context["stores_list"] = strings.Join(stores, "|")
+		res.Message = sb.String()
 		res.NextState = StatePickupAwaitingStore
 
 	case StatePickupAwaitingStore:
-		context["store"] = userInput // Guardamos el punto elegido
-		// PASO 6: Enviar URL del menú (Simulada por ahora)
-		res.Message = fmt.Sprintf("Perfecto, punto seleccionado: %s.\n\n Puedes ver nuestro menú aquí: https://menu.inoutdelivery.com/dlk\n\n¿Qué productos deseas ordenar? (Escríbelos aquí)", userInput)
-		res.NextState = StatePickupAwaitingProduct
+		storeName := userInput
+		// Intentar resolver por número
+		storesList := strings.Split(context["stores_list"], "|")
+		idx := 0
+		fmt.Sscanf(strings.TrimSpace(userInput), "%d", &idx)
+		if idx > 0 && idx <= len(storesList) {
+			storeName = storesList[idx-1]
+		}
+		context["store"] = storeName
+		res.Message = fmt.Sprintf("📍 Seleccionaste: *%s*\n\n¿Confirmas que recogerás aquí tu pedido?", storeName)
+		res.NextState = StatePickupConfirmingStore
+
+	case StatePickupConfirmingStore:
+		if isPositive(userInput) || strings.ToLower(strings.TrimSpace(userInput)) == "si" {
+			res.Message = fmt.Sprintf("✅ Perfecto. Tu pedido será para recoger en *%s*.\n\nPuedes ver nuestro menú aquí 👉 https://menu.donpepe.com\n\n¿Qué productos deseas ordenar? Escríbelos aquí:", context["store"])
+			res.NextState = StatePickupAwaitingProduct
+		} else if isNegative(userInput) {
+			res.Message = "Sin problema. ¿En qué ciudad buscas el punto de recogida?"
+			res.NextState = StatePickupAwaitingCity
+			delete(context, "store")
+		} else {
+			res.Message = fmt.Sprintf("¿Confirmas recoger en *%s*? (Sí/No)", context["store"])
+			res.NextState = StatePickupConfirmingStore
+		}
 
 	case StatePickupAwaitingProduct:
 		context["products"] = userInput
-		// PASO 7: Upselling (Recomendar algo más)
-		res.Message = fmt.Sprintf("¡Excelente elección con '%s'! 🍔\n\n¿Te gustaría agrandar tu combo o añadir unas papas medianas por solo $5.900 adicionales? (Responde Sí/No)", userInput)
-		res.NextState = StatePickupConfirming
+		res.Message = fmt.Sprintf("🍕 ¡Excelente elección con *%s*!\n\n¿Te gustaría agregar algo más a tu pedido? Por ejemplo, una bebida o acompañamiento. (Responde Sí/No)", userInput)
+		res.NextState = StatePickupUpsell
 
-	case StatePickupConfirming:
-		// PASO 8 & 9: Resumen y Link de Pago
-		upsell := "Sin adicionales"
-		if userInput == "si" || userInput == "Si" || userInput == "SI" {
-			upsell = "Combo Agrandado"
+	case StatePickupUpsell:
+		if isPositive(userInput) {
+			context["upsell"] = "Bebida o acompañamiento adicional"
+			res.Message = "¡Genial! Agrega ese complemento a tu pedido. Descríbelo:"
+			res.NextState = StatePickupAwaitingProduct
+			// Guardamos el estado del upsell pero volvemos a pedir más productos
+			context["upsell_applied"] = "si"
+		} else {
+			// Mostrar resumen
+			upsellText := ""
+			if context["upsell_applied"] == "si" {
+				upsellText = "\n• Complementos: ✅ Agregados"
+			}
+			res.Message = fmt.Sprintf(
+				"📝 *Resumen de tu pedido (Recogida en Tienda)*\n━━━━━━━━━━━━━━━━\n• Punto: %s\n• Ciudad: %s\n• Productos: %s%s\n\n💰 El precio final se calculará en tienda.\n\n¿Confirmas tu pedido? (Sí/No)",
+				context["store"], context["city"], context["products"], upsellText,
+			)
+			res.NextState = StatePickupConfirming
 		}
 
-		res.Message = fmt.Sprintf("📝 *Resumen de tu pedido:*\n- Tienda: %s\n- Ciudad: %s\n- Productos: %s\n- Adicional: %s\n\nTotal estimado: $24.900\n\n¿Confirmas tu pedido para generar el link de pago? (Responde CONFIRMAR)",
-			context["store"], context["city"], context["products"], upsell)
-		res.NextState = "AWAITING_PAYMENT_LINK"
-
-	case "AWAITING_PAYMENT_LINK":
-		if userInput == "confirmar" || userInput == "CONFIRMAR" {
-			// PASO 10: Simulación de link de pago y guardado
-			res.Message = "✅ ¡Pedido confirmado! Aquí tienes tu link de pago seguro: https://pagos.inout.com/ref123\n\nTu pedido quedará con estado 'Pendiente de Pago' hasta que completes la transacción. ¡Gracias por elegirnos!"
+	case StatePickupConfirming:
+		if isPositive(userInput) {
+			res.Message = fmt.Sprintf(
+				"✅ *¡Pedido confirmado!*\n\nTu pedido para recoger en *%s* ha sido registrado.\n\n🏪 Dirígete al local con esta confirmación.\n⏱️ Tiempo estimado de preparación: 20-30 minutos.\n\n¡Gracias por elegirnos! 🍕",
+				context["store"],
+			)
 			res.NextState = "FINISHED"
 		} else {
-			res.Message = "Entendido, he cancelado el proceso. Si deseas empezar de nuevo, escribe 'menu principal'."
+			res.Message = "Entendido, he cancelado el proceso. Si deseas iniciar de nuevo, selecciona 🥡 *Recoger en Tienda* desde el menú."
 			res.NextState = "IDLE"
 		}
 	}
