@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"multi-tenant-bot/internal/models"
+
 	"github.com/joho/godotenv"
 )
 
@@ -196,16 +198,16 @@ func applyDelivery(session *consoleSession, input string) string {
 		session.Delivery = &DeliverySession{}
 	}
 
-	resp := HandleDelivery(session.Delivery, input)
-	session.Delivery = resp.SessionData
+	resp := HandleDelivery(context.Background(), session.Delivery, input, input, []models.AIMessage{}, []models.Product{})
+	session.Delivery = resp.NewSession
 
-	if resp.NextState == StateOrderPlaced || resp.NextState == StateCancelled {
-		message := strings.Join(resp.Messages, "\n") + "\n\nSi deseas, tambien puedes escribir menu principal para volver al inicio."
+	if resp.NextState == StateDeliveryPlaced || resp.NextState == StateDeliveryIdle {
+		message := resp.Message + "\n\nSi deseas, tambien puedes escribir menu principal para volver al inicio."
 		resetConsoleSession(session)
 		return message
 	}
 
-	return strings.Join(resp.Messages, "\n")
+	return resp.Message
 }
 
 func applyPickup(session *consoleSession, input string) string {

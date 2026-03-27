@@ -7,20 +7,22 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"multi-tenant-bot/internal/models"
 )
 
 type CloudAPIWebhook struct {
-	Object string         `json:"object"`
+	Object string          `json:"object"`
 	Entry  []WebhookEntry `json:"entry"`
 }
 
 type WebhookEntry struct {
-	ID      string          `json:"id"`
+	ID      string           `json:"id"`
 	Changes []WebhookChange `json:"changes"`
 }
 
 type WebhookChange struct {
-	Field string              `json:"field"`
+	Field string               `json:"field"`
 	Value WhatsAppChangeValue `json:"value"`
 }
 
@@ -45,12 +47,30 @@ type WhatsAppContact struct {
 }
 
 type WhatsAppMessage struct {
-	From      string          `json:"from"`
-	ID        string          `json:"id"`
-	Timestamp string          `json:"timestamp"`
-	Type      string          `json:"type"`
-	Text      WhatsAppText    `json:"text"`
-	Context   WhatsAppContext `json:"context"`
+	From      string               `json:"from"`
+	ID        string               `json:"id"`
+	Timestamp string               `json:"timestamp"`
+	Type      string               `json:"type"`
+	Text      WhatsAppText       `json:"text"`
+	Interactive *WhatsAppInteractive `json:"interactive,omitempty"`
+	Context   WhatsAppContext      `json:"context"`
+}
+
+type WhatsAppInteractive struct {
+	Type        string               `json:"type"`
+	ButtonReply *WhatsAppButtonReply `json:"button_reply,omitempty"`
+	ListReply   *WhatsAppListReply   `json:"list_reply,omitempty"`
+}
+
+type WhatsAppButtonReply struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+type WhatsAppListReply struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
 }
 
 type WhatsAppText struct {
@@ -82,11 +102,20 @@ func ExtractIncomingMessages(payload *CloudAPIWebhook) []IncomingMessage {
 	for _, entry := range payload.Entry {
 		for _, change := range entry.Changes {
 			for _, msg := range change.Value.Messages {
+				text := msg.Text.Body
+				if msg.Type == "interactive" && msg.Interactive != nil {
+					if msg.Interactive.ButtonReply != nil {
+						text = msg.Interactive.ButtonReply.ID
+					} else if msg.Interactive.ListReply != nil {
+						text = msg.Interactive.ListReply.ID
+					}
+				}
+
 				messages = append(messages, IncomingMessage{
 					PhoneNumberID: change.Value.Metadata.PhoneNumberID,
 					From:          msg.From,
 					MessageID:     msg.ID,
-					Text:          msg.Text.Body,
+					Text:          text,
 					Type:          msg.Type,
 				})
 			}
@@ -96,34 +125,142 @@ func ExtractIncomingMessages(payload *CloudAPIWebhook) []IncomingMessage {
 	return messages
 }
 
-type WhatsAppOutboundMessage struct {
-	MessagingProduct string `json:"messaging_product"`
-	To               string `json:"to"`
-	Type             string `json:"type"`
-	Text             struct {
-		Body       string `json:"body"`
-		PreviewUrl bool   `json:"preview_url"`
-	} `json:"text"`
+func SendWhatsAppMessage(ctx context.Context, phoneNumberID, to, token, message string) error {
+	payload := map[string]interface{}{
+		"messaging_product": "whatsapp",
+		"to":                to,
+		"type":              "text",
+		"text": map[string]interface{}{
+			"body":        message,
+			"preview_url": false,
+		},
+	}
+	return sendJSON(ctx, phoneNumberID, token, payload)
 }
 
-func SendWhatsAppMessage(ctx context.Context, phoneNumberID, to, token, message string) error {
-	payload := WhatsAppOutboundMessage{
-		MessagingProduct: "whatsapp",
-		To:               to,
-		Type:             "text",
+func SendWhatsAppButton(ctx context.Context, phoneNumberID, to, token, headerText, bodyText, footerText string, buttons []models.InteractiveButton) error {
+	if len(buttons) > 3 {
+		return fmt.Errorf("max 3 buttons allowed")
 	}
-	payload.Text.Body = message
-	payload.Text.PreviewUrl = false
 
+	type actionButton struct {
+		Type  string `json:"type"`
+		Reply struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"reply"`
+	}
+
+	var actionButtons []actionButton
+	for _, b := range buttons {
+		ab := actionButton{Type: "reply"}
+		ab.Reply.ID = b.ID
+		ab.Reply.Title = b.Title
+		actionButtons = append(actionButtons, ab)
+	}
+
+	payload := map[string]interface{}{
+		"messaging_product": "whatsapp",
+		"to":                to,
+		"type":              "interactive",
+		"interactive": map[string]interface{}{
+			"type": "button",
+			"body": map[string]interface{}{
+				"text": bodyText,
+			},
+			"action": map[string]interface{}{
+				"buttons": actionButtons,
+			},
+		},
+	}
+
+	if headerText != "" {
+		payload["interactive"].(map[string]interface{})["header"] = map[string]interface{}{
+			"type": "text",
+			"text": headerText,
+		}
+	}
+	if footerText != "" {
+		payload["interactive"].(map[string]interface{})["footer"] = map[string]interface{}{
+			"text": footerText,
+		}
+	}
+
+	return sendJSON(ctx, phoneNumberID, token, payload)
+}
+
+type ListSection struct {
+	Title string
+	Rows  []ListRow
+}
+
+type ListRow struct {
+	ID          string
+	Title       string
+	Description string
+}
+
+func SendWhatsAppList(ctx context.Context, phoneNumberID, to, token, headerText, bodyText, footerText, buttonLabel string, sections []ListSection) error {
+	type row struct {
+		ID          string `json:"id"`
+		Title       string `json:"title"`
+		Description string `json:"description,omitempty"`
+	}
+	type section struct {
+		Title string `json:"title,omitempty"`
+		Rows  []row  `json:"rows"`
+	}
+
+	var wSections []section
+	for _, s := range sections {
+		var wRows []row
+		for _, r := range s.Rows {
+			wRows = append(wRows, row{ID: r.ID, Title: r.Title, Description: r.Description})
+		}
+		wSections = append(wSections, section{Title: s.Title, Rows: wRows})
+	}
+
+	payload := map[string]interface{}{
+		"messaging_product": "whatsapp",
+		"to":                to,
+		"type":              "interactive",
+		"interactive": map[string]interface{}{
+			"type": "list",
+			"body": map[string]interface{}{
+				"text": bodyText,
+			},
+			"action": map[string]interface{}{
+				"button":   buttonLabel,
+				"sections": wSections,
+			},
+		},
+	}
+
+	if headerText != "" {
+		payload["interactive"].(map[string]interface{})["header"] = map[string]interface{}{
+			"type": "text",
+			"text": headerText,
+		}
+	}
+	if footerText != "" {
+		payload["interactive"].(map[string]interface{})["footer"] = map[string]interface{}{
+			"text": footerText,
+		}
+	}
+
+	return sendJSON(ctx, phoneNumberID, token, payload)
+}
+
+func sendJSON(ctx context.Context, phoneNumberID, token string, payload interface{}) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal message: %w", err)
+		return err
 	}
 
 	url := fmt.Sprintf("https://graph.facebook.com/v19.0/%s/messages", phoneNumberID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return err
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -131,7 +268,7 @@ func SendWhatsAppMessage(ctx context.Context, phoneNumberID, to, token, message 
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("send message: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
 

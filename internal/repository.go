@@ -7,61 +7,13 @@ import (
 	"time"
 
 	"multi-tenant-bot/db"
+	"multi-tenant-bot/internal/models"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var ErrTenantNotFound = errors.New("tenant not found")
-
-type BotConfig struct {
-	WelcomeMessage string   `json:"welcome_message"`
-	MeetingPoints  []string `json:"meeting_points"`
-	MenuLink       string   `json:"menu_link"`
-}
-
-type Product struct {
-	ID          string  `json:"id"`
-	CategoryID  *string `json:"category_id"`
-	Name        string  `json:"name"`
-	Description *string `json:"description"`
-	Price       float64 `json:"price"`
-	Available   bool    `json:"available"`
-}
-
-type CoverageZone struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	DeliveryFee float64 `json:"delivery_fee"`
-	MinOrder    float64 `json:"min_order"`
-}
-
-type OrderRecord struct {
-	ID      string
-	Status  string
-	Total   float64
-	Address string
-	Notes   string
-	Items   []OrderItemRecord
-}
-
-type OrderItemRecord struct {
-	Name     string `json:"name"`
-	Quantity int    `json:"quantity"`
-}
-
-type Tenant struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	PhoneNumberID string          `json:"phone_number_id"`
-	POSProvider   string          `json:"pos_provider"`
-	POSConfig     json.RawMessage `json:"pos_config"`
-	BotConfigRaw  json.RawMessage `json:"-"`
-	BotConfig     BotConfig       `json:"bot_config"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
-	WhatsAppToken string          `json:"whatsapp_token"`
-}
 
 type Repository struct {
 	db *pgxpool.Pool
@@ -75,10 +27,10 @@ func (r *Repository) Ping(ctx context.Context) error {
 	return r.db.Ping(ctx)
 }
 
-func (r *Repository) ResolveTenantByPhoneNumberID(ctx context.Context, phoneNumberID string) (*Tenant, error) {
+func (r *Repository) ResolveTenantByPhoneNumberID(ctx context.Context, phoneNumberID string) (*models.Tenant, error) {
 	row := r.db.QueryRow(ctx, db.QueryResolveTenantByPhoneNumberID, phoneNumberID)
 
-	var tenant Tenant
+	var tenant models.Tenant
 	if err := row.Scan(
 		&tenant.ID,
 		&tenant.Name,
@@ -103,16 +55,16 @@ func (r *Repository) ResolveTenantByPhoneNumberID(ctx context.Context, phoneNumb
 	return &tenant, nil
 }
 
-func (r *Repository) GetProducts(ctx context.Context, tenantID string) ([]Product, error) {
+func (r *Repository) GetProducts(ctx context.Context, tenantID string) ([]models.Product, error) {
 	rows, err := r.db.Query(ctx, db.QueryGetProducts, tenantID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var products []Product
+	var products []models.Product
 	for rows.Next() {
-		var p Product
+		var p models.Product
 		if err := rows.Scan(
 			&p.ID,
 			&p.CategoryID,
@@ -133,16 +85,16 @@ func (r *Repository) GetProducts(ctx context.Context, tenantID string) ([]Produc
 	return products, nil
 }
 
-func (r *Repository) GetCoverageZones(ctx context.Context, tenantID string) ([]CoverageZone, error) {
+func (r *Repository) GetCoverageZones(ctx context.Context, tenantID string) ([]models.CoverageZone, error) {
 	rows, err := r.db.Query(ctx, db.QueryGetCoverageZones, tenantID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var zones []CoverageZone
+	var zones []models.CoverageZone
 	for rows.Next() {
-		var z CoverageZone
+		var z models.CoverageZone
 		if err := rows.Scan(&z.ID, &z.Name, &z.DeliveryFee, &z.MinOrder); err != nil {
 			return nil, err
 		}
@@ -156,16 +108,16 @@ func (r *Repository) GetCoverageZones(ctx context.Context, tenantID string) ([]C
 	return zones, nil
 }
 
-func (r *Repository) GetActiveOrdersByPhone(ctx context.Context, tenantID string, phone string) ([]OrderRecord, error) {
+func (r *Repository) GetActiveOrdersByPhone(ctx context.Context, tenantID string, phone string) ([]models.OrderRecord, error) {
 	rows, err := r.db.Query(ctx, db.QueryGetActiveOrdersByPhone, tenantID, phone)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var orders []OrderRecord
+	var orders []models.OrderRecord
 	for rows.Next() {
-		var o OrderRecord
+		var o models.OrderRecord
 		var itemsJSON string
 		if err := rows.Scan(&o.ID, &o.Status, &o.Total, &o.Address, &o.Notes, &itemsJSON); err != nil {
 			return nil, err
@@ -183,4 +135,71 @@ func (r *Repository) GetActiveOrdersByPhone(ctx context.Context, tenantID string
 	}
 
 	return orders, nil
+}
+
+func (r *Repository) GetCustomerByPhone(ctx context.Context, tenantID string, phone string) (*models.Customer, error) {
+	row := r.db.QueryRow(ctx, db.QueryGetCustomerByPhone, tenantID, phone)
+
+	var c models.Customer
+	var metadataJSON []byte
+	if err := row.Scan(&c.ID, &c.TenantID, &c.WhatsAppPhone, &c.Name, &c.Email, &metadataJSON); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if len(metadataJSON) > 0 {
+		_ = json.Unmarshal(metadataJSON, &c.Metadata)
+	}
+
+	return &c, nil
+}
+
+func (r *Repository) CreateCustomer(ctx context.Context, c *models.Customer) error {
+	metadataJSON, _ := json.Marshal(c.Metadata)
+	row := r.db.QueryRow(ctx, db.QueryCreateCustomer, c.TenantID, c.WhatsAppPhone, c.Name, c.Email, metadataJSON)
+
+	var createdAt time.Time
+	if err := row.Scan(&c.ID, &createdAt); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *Repository) UpdateCustomerMetadata(ctx context.Context, tenantID string, phone string, metadata map[string]interface{}) error {
+	metadataJSON, _ := json.Marshal(metadata)
+	_, err := r.db.Exec(ctx, db.QueryUpdateCustomerMetadata, tenantID, phone, metadataJSON)
+	return err
+}
+
+func (r *Repository) CreateOrder(ctx context.Context, o *models.Order) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	metadataJSON, _ := json.Marshal(o.Metadata)
+	row := tx.QueryRow(ctx, db.QueryCreateOrder,
+		o.TenantID, o.CustomerID, o.OrderType, o.Status, o.DeliveryAddress,
+		o.Subtotal, o.DeliveryFee, o.Total, o.PaymentMethod, metadataJSON,
+	)
+
+	var createdAt time.Time
+	if err := row.Scan(&o.ID, &createdAt); err != nil {
+		return err
+	}
+
+	for _, item := range o.Items {
+		_, err := tx.Exec(ctx, db.QueryCreateOrderItem,
+			o.ID, item.ProductID, item.Name, item.UnitPrice, item.Quantity, item.Subtotal,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
 }

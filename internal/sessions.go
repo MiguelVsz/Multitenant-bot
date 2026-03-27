@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"multi-tenant-bot/internal/models"
+
 	"github.com/redis/go-redis/v9"
 )
 
@@ -14,7 +16,7 @@ type ConversationSession struct {
 	UserID       string            `json:"user_id"`
 	CurrentState string            `json:"current_state"`
 	Context      map[string]string `json:"context"`
-	History      []AIMessage       `json:"history"`
+	History      []models.AIMessage `json:"history"`
 	UpdatedAt    time.Time         `json:"updated_at"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 }
@@ -38,7 +40,7 @@ func (s *SessionStore) Load(ctx context.Context, tenantID string, userID string)
 				UserID:       userID,
 				CurrentState: "IDLE",
 				Context:      map[string]string{},
-				History:      []AIMessage{},
+				History:      []models.AIMessage{},
 				UpdatedAt:    time.Now().UTC(),
 			}, nil
 		}
@@ -53,7 +55,7 @@ func (s *SessionStore) Load(ctx context.Context, tenantID string, userID string)
 		session.Context = map[string]string{}
 	}
 	if session.History == nil {
-		session.History = []AIMessage{}
+		session.History = []models.AIMessage{}
 	}
 	return &session, nil
 }
@@ -64,7 +66,7 @@ func (s *SessionStore) Save(ctx context.Context, session *ConversationSession) e
 		session.Context = map[string]string{}
 	}
 	if session.History == nil {
-		session.History = []AIMessage{}
+		session.History = []models.AIMessage{}
 	}
 
 	payload, err := json.Marshal(session)

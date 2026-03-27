@@ -8,15 +8,12 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"multi-tenant-bot/internal/models"
 )
 
-type AIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
 type AIClient interface {
-	Chat(ctx context.Context, messages []AIMessage) (string, error)
+	Chat(ctx context.Context, messages []models.AIMessage) (string, error)
 }
 
 type GroqClient struct {
@@ -26,13 +23,13 @@ type GroqClient struct {
 }
 
 type groqChatRequest struct {
-	Model    string      `json:"model"`
-	Messages []AIMessage `json:"messages"`
+	Model    string           `json:"model"`
+	Messages []models.AIMessage `json:"messages"`
 }
 
 type groqChatResponse struct {
 	Choices []struct {
-		Message AIMessage `json:"message"`
+		Message models.AIMessage `json:"message"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -49,7 +46,7 @@ func NewGroqClient(apiKey string) *GroqClient {
 	}
 }
 
-func (c *GroqClient) Chat(ctx context.Context, messages []AIMessage) (string, error) {
+func (c *GroqClient) Chat(ctx context.Context, messages []models.AIMessage) (string, error) {
 	reqBody, err := json.Marshal(groqChatRequest{
 		Model:    c.model,
 		Messages: messages,

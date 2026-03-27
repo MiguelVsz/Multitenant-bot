@@ -5,184 +5,225 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
+
+	"multi-tenant-bot/internal/models"
 )
 
-// Constantes de Estado
+// Constantes de Estado para Domicilios
 const (
-	StateIdle            = "IDLE"
-	StateGreeting        = "GREETING"
-	StateAwaitingAddress = "AWAITING_ADDRESS"
-	StateAwaitingProduct = "AWAITING_PRODUCT"
-	StateConfirmingOrder = "CONFIRMING_ORDER"
-	StateOrderPlaced     = "ORDER_PLACED"
-	StateCancelled       = "CANCELLED"
-	StatePayment         = "PAYMENT"
-	StateOrderCreate     = "ORDER_CREATE"
-	StateOrderConfirm    = "ORDER_CONFIRM"
+	StateDeliveryIdle            = "IDLE"
+	StateDeliveryAwaitingAddress = "AWAITING_ADDRESS"
+	StateDeliveryAwaitingProduct = "AWAITING_PRODUCT"
+	StateDeliveryUpsell           = "UPSELLING"
+	StateDeliveryConfirmingOrder = "CONFIRMING_ORDER"
+	StateDeliveryPayment         = "PAYMENT"
+	StateDeliveryPlaced          = "ORDER_PLACED"
 )
 
 type DeliverySession struct {
-	State       string            `json:"state"`
-	Address     string            `json:"address,omitempty"`
-	Product     string            `json:"product,omitempty"`
-	PhoneNumber string            `json:"phone_number"`
-	UserData    map[string]string `json:"user_data"`
-	Cart        []string          `json:"cart"`
+	State       string             `json:"state"`
+	Address     string             `json:"address,omitempty"`
+	Cart        []models.OrderItem `json:"cart"`
+	PhoneNumber string             `json:"phone_number"`
+	CustomerID  string             `json:"customer_id"`
+	Total       float64            `json:"total"`
 }
 
-type AgentResponse struct {
-	Messages    []string         `json:"messages"`
-	NextState   string           `json:"next_state"`
-	SessionData *DeliverySession `json:"session_data"`
+type DeliveryResponse struct {
+	Message    string
+	NextState  string
+	NewSession *DeliverySession
+	Buttons    []models.InteractiveButton // Usando modelo compartido
 }
 
-// HandleDelivery maneja la lógica de la conversación de domicilios
-func HandleDelivery(session *DeliverySession, userMessage string) *AgentResponse {
+func HandleDelivery(
+	ctx context.Context,
+	session *DeliverySession,
+	userInput string,
+	textNorm string,
+	history []models.AIMessage,
+	products []models.Product,
+) *DeliveryResponse {
 	if session == nil {
-		session = &DeliverySession{State: StateIdle}
+		session = &DeliverySession{State: StateDeliveryIdle}
 	}
 
+	apiKey := resolveAPIKey()
+
 	switch session.State {
-
-	case "", StateIdle:
-		session.State = StateAwaitingAddress
-		return &AgentResponse{
-			Messages:    []string{"¡Claro! Con gusto te ayudo con tu domicilio. ¿A qué dirección lo enviamos?"},
-			NextState:   StateAwaitingAddress,
-			SessionData: session,
+	case "", StateDeliveryIdle:
+		session.State = StateDeliveryAwaitingAddress
+		return &DeliveryResponse{
+			Message:    "¡Claro! ¿A qué dirección enviamos tu pedido?",
+			NextState:  StateDeliveryAwaitingAddress,
+			NewSession: session,
 		}
 
-	case StateAwaitingAddress:
-		session.Address = userMessage
-		session.State = StateAwaitingProduct
-		return &AgentResponse{
-			Messages:    []string{fmt.Sprintf("Dirección recibida: %s. ¿Qué producto deseas pedir? (Escribe 'carta' para ver opciones)", session.Address)},
-			NextState:   StateAwaitingProduct,
-			SessionData: session,
+	case StateDeliveryAwaitingAddress:
+		session.Address = userInput
+		session.State = StateDeliveryAwaitingProduct
+		return &DeliveryResponse{
+			Message:    fmt.Sprintf("Dirección registrada: %s. ¿Qué te gustaría pedir? (Puedes elegir algo de nuestra carta)", session.Address),
+			NextState:  StateDeliveryAwaitingProduct,
+			NewSession: session,
 		}
 
-	case StateAwaitingProduct:
-		menu := getMenuFromAPI()
-		apiKey, _ := resolveRouterKey()
-
-		// Si el usuario solo quiere ver el menú, se lo mostramos y nos quedamos aquí
-		if strings.ToLower(strings.TrimSpace(userMessage)) == "carta" {
-			return &AgentResponse{
-				Messages:    []string{"Mira nuestro menú:\n" + menu + "\n\n¿Qué te gustaría pedir?"},
-				NextState:   StateAwaitingProduct,
-				SessionData: session,
+	case StateDeliveryAwaitingProduct:
+		// IA para identificar producto
+		productName, quantity, found := pickProductWithAI(userInput, products, history, apiKey)
+		if !found {
+			return &DeliveryResponse{
+				Message:    "No logré identificar qué producto deseas. ¿Me lo podrías repetir, por favor?",
+				NextState:  StateDeliveryAwaitingProduct,
+				NewSession: session,
 			}
 		}
 
-		// Intentamos IA
-		systemSales := fmt.Sprintf(`Eres el asistente virtual del restaurante Burgers & Co.
-		Ayudas al cliente a elegir del menú usando solo estos productos: %s
-		Prioriza recomendar combos y promociones. Sé amable, claro y breve.
-		Nunca inventes productos fuera de la lista.
-		Si el cliente no sabe qué pedir, hazle una pregunta corta sobre su preferencia.
-		Formato de respuesta: Nombre del producto — descripción corta — precio.
-		Ejemplo: Combo Clásico — Hamburguesa + papas + bebida — $18.000`, menu)
-		aiReply := callGroqDirect(systemSales, userMessage, apiKey)
-
-		// GUARDAMOS EL PRODUCTO (ya sea lo que dijo la IA o el texto bruto del usuario)
-		if aiReply != "" {
-			session.Product = aiReply
-		} else {
-			session.Product = userMessage // Plan B: guardamos el texto tal cual
-		}
-
-		// AVANZAMOS DE ESTADO SIEMPRE (Aquí se rompe el bucle)
-		session.State = StateConfirmingOrder
-
-		replyText := aiReply
-		if replyText == "" {
-			replyText = fmt.Sprintf("¡Excelente elección! Anotado: %s.", userMessage)
-		}
-
-		return &AgentResponse{
-			Messages:    []string{replyText, "¿Confirmas tu pedido? (Si/No)"},
-			NextState:   StateConfirmingOrder,
-			SessionData: session,
-		}
-
-	case StateConfirmingOrder:
-		if isPositive(userMessage) {
-			session.State = StatePayment
-			return &AgentResponse{
-				Messages:    []string{"¡Perfecto! ¿Cómo deseas pagar? Tenemos: **Efectivo** o **Transferencia**."},
-				NextState:   StatePayment,
-				SessionData: session,
+		// Buscar detalles del producto real
+		var selected models.Product
+		for _, p := range products {
+			if strings.EqualFold(p.Name, productName) {
+				selected = p
+				break
 			}
 		}
 
-		if isNegative(userMessage) {
-			session.State = StateCancelled
-			return &AgentResponse{
-				Messages:    []string{"Pedido cancelado. ¿Te puedo ayudar con algo más?"},
-				NextState:   StateCancelled,
-				SessionData: &DeliverySession{State: StateIdle},
-			}
+		item := models.OrderItem{
+			ProductID: &selected.ID,
+			Name:      selected.Name,
+			UnitPrice: selected.Price,
+			Quantity:  quantity,
+			Subtotal:  selected.Price * float64(quantity),
 		}
-		return &AgentResponse{
-			Messages:    []string{"Por favor, confirma con 'si' o 'no'."},
-			NextState:   StateConfirmingOrder,
-			SessionData: session,
+		session.Cart = append(session.Cart, item)
+		session.Total += item.Subtotal
+
+		// Estado de Upsell (Sugerencia de agrandado)
+		session.State = StateDeliveryUpsell
+		upsellSuggestion := getUpsellSuggestion(selected, products, history, apiKey)
+		
+		return &DeliveryResponse{
+			Message:    fmt.Sprintf("¡Excelente! He añadido %d x %s a tu pedido. %s", quantity, selected.Name, upsellSuggestion),
+			NextState:  StateDeliveryUpsell,
+			NewSession: session,
 		}
 
-	case StatePayment:
-		// 1. Validamos lo que el usuario escribió después de la pregunta de pago
-		metodo := strings.ToLower(userMessage)
-		if strings.Contains(metodo, "efectivo") || strings.Contains(metodo, "transferencia") {
+	case StateDeliveryUpsell:
+		if isPositive(userInput) {
+			// Encontrar qué sugirió la IA (esto es un poco complejo sin estado extra, pero por ahora simulamos que acepta el mejor complemento)
+			// Para algo real, la IA de upsell debería devolver el productoID sugerido.
+			// Por ahora, asumimos que el usuario acepta un 'complemento' genérico si dice sí.
+			// TODO: Mejorar lógica de upsell para identificar el producto aceptado.
+		}
+		
+		session.State = StateDeliveryConfirmingOrder
+		return &DeliveryResponse{
+			Message:    fmt.Sprintf("Entendido. Tu pedido actual es: %s por un total de $%.0f. ¿Confirmas tu pedido? (Si/No)", renderCart(session.Cart), session.Total),
+			NextState:  StateDeliveryConfirmingOrder,
+			NewSession: session,
+		}
 
-			// 2. Aquí es donde realmente "Crearías la orden" (StateOrderCreate)
-			// Por ahora lo simulamos avanzando al éxito
-			session.State = StateOrderPlaced
-
-			return &AgentResponse{
-				Messages: []string{
-					fmt.Sprintf("✅ Pago por %s registrado.", userMessage),
-					"Estamos creando tu orden en el sistema... ⏳",
-					"¡Listo! Tu pedido #1234 ha sido confirmado. Llegará en 30 min.",
+	case StateDeliveryConfirmingOrder:
+		if textNorm == "confirm_ok" || isPositive(userInput) {
+			session.State = StateDeliveryPayment
+			return &DeliveryResponse{
+				Message:    "¡Perfecto! ¿Cómo deseas pagar?",
+				NextState:  StateDeliveryPayment,
+				NewSession: session,
+				Buttons: []models.InteractiveButton{
+					{ID: "pay_cash", Title: "💵 Efectivo"},
+					{ID: "pay_transfer", Title: "📲 Transferencia"},
 				},
-				NextState:   StateOrderPlaced,
-				SessionData: session,
 			}
 		}
+		if textNorm == "confirm_cancel" || isNegative(userInput) {
+			return &DeliveryResponse{
+				Message:    "Pedido cancelado. ¿Hay algo más en lo que pueda ayudarte?",
+				NextState:  StateDeliveryIdle,
+				NewSession: &DeliverySession{State: StateDeliveryIdle},
+			}
+		}
+		return &DeliveryResponse{
+			Message:    "Por favor, confirma tu pedido.",
+			NextState:  StateDeliveryConfirmingOrder,
+			NewSession: session,
+			Buttons: []models.InteractiveButton{
+				{ID: "confirm_ok", Title: "✅ Confirmar"},
+				{ID: "confirm_cancel", Title: "❌ Cancelar"},
+			},
+		}
 
-		// Si el usuario escribe otra cosa que no sea el método de pago
-		return &AgentResponse{
-			Messages:    []string{"Por favor, indica si prefieres **Efectivo** o **Transferencia** para continuar."},
-			NextState:   StatePayment,
-			SessionData: session,
+	case StateDeliveryPayment:
+		if textNorm == "pay_cash" || strings.Contains(textNorm, "efectivo") {
+			session.State = StateDeliveryPlaced
+			return &DeliveryResponse{
+				Message:    "✅ Pago en Efectivo registrado. Estamos procesando tu orden... ¡Llegará pronto!",
+				NextState:  StateDeliveryPlaced,
+				NewSession: session,
+			}
+		}
+		if textNorm == "pay_transfer" || strings.Contains(textNorm, "transferencia") {
+			session.State = StateDeliveryPlaced
+			return &DeliveryResponse{
+				Message:    "✅ Pago por Transferencia registrado. Por favor envía el comprobante por aquí. Estamos procesando tu orden... ¡Llegará pronto!",
+				NextState:  StateDeliveryPlaced,
+				NewSession: session,
+			}
+		}
+		return &DeliveryResponse{
+			Message:    "Por favor, indica tu método de pago.",
+			NextState:  StateDeliveryPayment,
+			NewSession: session,
+			Buttons: []models.InteractiveButton{
+				{ID: "pay_cash", Title: "💵 Efectivo"},
+				{ID: "pay_transfer", Title: "📲 Transferencia"},
+			},
 		}
 
 	default:
-		session.State = StateAwaitingAddress
-		return &AgentResponse{
-			Messages:    []string{"Si quieres hacer un pedido, dime la dirección de entrega."},
-			NextState:   StateAwaitingAddress,
-			SessionData: session,
+		return &DeliveryResponse{
+			Message:    "Lo siento, hubo un error en el flujo. ¿Podrías decirme tu dirección de nuevo?",
+			NextState:  StateDeliveryAwaitingAddress,
+			NewSession: &DeliverySession{State: StateDeliveryAwaitingAddress},
 		}
 	}
 }
 
-// --- FUNCIONES DE APOYO ---
-
-func callGroqDirect(systemPrompt string, userPrompt string, apiKey string) string {
+func pickProductWithAI(input string, products []models.Product, history []models.AIMessage, apiKey string) (string, int, bool) {
 	if apiKey == "" {
-		return ""
+		return "", 0, false
 	}
 
-	reqBody, _ := json.Marshal(routerGroqRequest{
-		Model: "llama-3.3-70b-versatile",
-		Messages: []routerMsg{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userPrompt},
-		},
+	productList := ""
+	for _, p := range products {
+		productList += fmt.Sprintf("- %s ($%.0f)\n", p.Name, p.Price)
+	}
+
+	prompt := fmt.Sprintf(`Identifica el producto y la cantidad que el usuario quiere pedir de la siguiente lista:
+%s
+
+Responde únicamente en formato JSON: {"product": "Nombre Exacto", "quantity": 1, "found": true}
+Si no encuentras el producto, responde {"found": false}`, productList)
+
+	messages := []map[string]string{
+		{"role": "system", "content": prompt},
+	}
+	// Añadir historial reciente
+	for _, h := range history {
+		role := h.Role
+		if role == "assistant" { role = "assistant" }
+		messages = append(messages, map[string]string{"role": role, "content": h.Content})
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": input})
+
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model": "llama-3.3-70b-versatile",
+		"messages": messages,
+		"response_format": map[string]string{"type": "json_object"},
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -193,78 +234,82 @@ func callGroqDirect(systemPrompt string, userPrompt string, apiKey string) strin
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		fmt.Println("❌ ERROR DE RED:", err) // ESTO ES CLAVE
-		return ""
-	}
+	if err != nil || resp.StatusCode != 200 { return "", 0, false }
 	defer resp.Body.Close()
 
-	// Si Groq nos da un error (ej: 401 Unauthorized o 429 Rate Limit)
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Printf("❌ ERROR DE API GROQ (Status %d): %s\n", resp.StatusCode, string(body))
-		return ""
+	var res struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
 	}
+	json.NewDecoder(resp.Body).Decode(&res)
 
-	var parsed routerGroqResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		fmt.Println("❌ ERROR DECODE:", err)
-		return ""
+	var data struct {
+		Product  string `json:"product"`
+		Quantity int    `json:"quantity"`
+		Found    bool   `json:"found"`
 	}
+	json.Unmarshal([]byte(res.Choices[0].Message.Content), &data)
 
-	if len(parsed.Choices) > 0 {
-		return strings.TrimSpace(parsed.Choices[0].Message.Content)
-	}
-
-	// Si llegamos aquí, la IA respondió algo vacío o hubo un error de API
-	fmt.Printf("Groq devolvió 0 opciones. Status: %s\n", resp.Status)
-	return ""
+	return data.Product, data.Quantity, data.Found
 }
 
-func MainHandler(phoneNumber string, userInput string) string {
-	session := getSessionFromRedis(phoneNumber)
+func getUpsellSuggestion(product models.Product, _ []models.Product, _ []models.AIMessage, apiKey string) string {
+	if apiKey == "" { return "¿Deseas agregar alguna bebida?" }
 
-	// Si el bot está libre, el Router decide qué hacer
-	if session.State == StateIdle || session.State == "" {
-		route := HandleRouter(userInput)
-		if route.Intent == "delivery" || route.Intent == "carta" {
-			session.State = StateAwaitingAddress
-			saveSessionToRedis(phoneNumber, session)
-			return "¡Claro! ¿A qué dirección enviamos tu pedido?"
-		}
-		return route.Message
+	prompt := fmt.Sprintf(`El usuario ha pedido: %s. 
+Basado en esto, sugiere un "agrandado" o complemento ideal (ej. papas mas grandes, doble carne, bebida, postre).
+Sé persuasivo pero breve. No uses más de 20 palabras.`, product.Name)
+
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model": "llama-3.3-70b-versatile",
+		"messages": []map[string]string{{"role": "system", "content": prompt}},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.groq.com/openai/v1/chat/completions", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 { return "¿Deseas algo más para acompañar?" }
+	defer resp.Body.Close()
+
+	var res struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
 	}
+	json.NewDecoder(resp.Body).Decode(&res)
 
-	// Si ya hay proceso iniciado, seguimos en Delivery
-	agentRes := HandleDelivery(session, userInput)
-	saveSessionToRedis(phoneNumber, agentRes.SessionData)
-	return strings.Join(agentRes.Messages, "\n")
+	return res.Choices[0].Message.Content
+}
+
+func renderCart(cart []models.OrderItem) string {
+	var items []string
+	for _, item := range cart {
+		items = append(items, fmt.Sprintf("%d x %s", item.Quantity, item.Name))
+	}
+	return strings.Join(items, ", ")
+}
+
+func resolveAPIKey() string {
+	if v := os.Getenv("AGENT_DELIVERY_KEY"); v != "" { return v }
+	return os.Getenv("GROQ_API_KEY")
 }
 
 func isPositive(msg string) bool {
 	s := strings.ToLower(msg)
-	return strings.Contains(s, "si") || strings.Contains(s, "ok") || strings.Contains(s, "vale")
+	return strings.Contains(s, "si") || strings.Contains(s, "ok") || strings.Contains(s, "vale") || strings.Contains(s, "acepto")
 }
 
 func isNegative(msg string) bool {
 	s := strings.ToLower(msg)
 	return strings.Contains(s, "no") || strings.Contains(s, "cancelar")
-}
-
-func getMenuFromAPI() string {
-	return "1. Combo Clásico ($18.000), 2. Combo Parrillero ($25.000), 3. Papas Fritas ($8.000)"
-}
-
-// PERSISTENCIA TEMPORAL (Simulando Redis)
-var tempStorage = make(map[string]*DeliverySession)
-
-func getSessionFromRedis(phoneNumber string) *DeliverySession {
-	if s, ok := tempStorage[phoneNumber]; ok {
-		return s
-	}
-	return &DeliverySession{PhoneNumber: phoneNumber, State: StateIdle}
-}
-
-func saveSessionToRedis(phoneNumber string, session *DeliverySession) {
-	tempStorage[phoneNumber] = session
 }

@@ -38,4 +38,28 @@ WHERE o.tenant_id = $1
   AND o.status IN ('pending', 'confirmed', 'preparing', 'ready', 'dispatched')
 GROUP BY o.id, o.status, o.total, o.delivery_address, o.notes
 ORDER BY o.created_at DESC`
+
+	QueryGetCustomerByPhone = `
+SELECT id, tenant_id, whatsapp_phone, name, email, metadata
+FROM gobot.customers
+WHERE tenant_id = $1 AND whatsapp_phone = $2`
+
+	QueryCreateCustomer = `
+INSERT INTO gobot.customers (tenant_id, whatsapp_phone, name, email, metadata)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, created_at`
+
+	QueryUpdateCustomerMetadata = `
+UPDATE gobot.customers
+SET metadata = $3, updated_at = NOW()
+WHERE tenant_id = $1 AND whatsapp_phone = $2`
+
+	QueryCreateOrder = `
+INSERT INTO gobot.orders (tenant_id, customer_id, order_type, status, delivery_address, subtotal, delivery_fee, total, payment_method, metadata)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, created_at`
+
+	QueryCreateOrderItem = `
+INSERT INTO gobot.order_items (order_id, product_id, name, unit_price, quantity, subtotal)
+VALUES ($1, $2, $3, $4, $5, $6)`
 )
