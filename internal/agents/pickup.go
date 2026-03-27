@@ -24,10 +24,11 @@ const (
 
 // PickupResponse define la estructura de retorno del agente pickup
 type PickupResponse struct {
-	Message    string
-	NextState  string
-	NewContext map[string]string
-	Buttons    []models.InteractiveButton
+	Message      string
+	NextState    string
+	NewContext   map[string]string
+	Buttons      []models.InteractiveButton
+	ShowZoneList bool
 }
 
 // HandlePickup maneja el flujo de recogida en tienda usando zonas de cobertura de la BD y la IA para productos
@@ -57,7 +58,7 @@ func HandlePickup(
 	case "IDLE", "":
 		res.Message = "🥡 *Recoger en Tienda*\n━━━━━━━━━━━━━━━━\n\n¡Perfecto! ¿En qué *sede o ciudad* te gustaría recoger tu pedido?"
 		res.NextState = "PICKUP_AWAITING_LOCATION"
-		res.Buttons = buildZoneButtons(zones)
+		res.ShowZoneList = true
 
 	case "PICKUP_AWAITING_LOCATION":
 		// Guard: botones
@@ -74,7 +75,7 @@ func HandlePickup(
 		if action == "reply" {
 			res.Message = aiMsg
 			res.NextState = "PICKUP_AWAITING_LOCATION"
-			res.Buttons = buildZoneButtons(zones)
+			res.ShowZoneList = true
 			res.NewContext = context
 			return res
 		}
@@ -441,21 +442,4 @@ func normalizeText(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
-}
-
-// buildZoneButtons genera botones de sede dinámicos (hasta 2) para WhatsApp + botón de cancelar
-func buildZoneButtons(zones []models.CoverageZone) []models.InteractiveButton {
-	var btns []models.InteractiveButton
-	for i, z := range zones {
-		if i >= 2 {
-			break
-		}
-		title := z.Name
-		if len(title) > 20 {
-			title = title[:20]
-		}
-		btns = append(btns, models.InteractiveButton{ID: z.Name, Title: title})
-	}
-	btns = append(btns, models.InteractiveButton{ID: "confirm_cancel", Title: "❌ Cancelar"})
-	return btns
 }

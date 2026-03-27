@@ -424,6 +424,35 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		pkBytes, _ := json.Marshal(resp.NewContext)
 		session.Metadata["pickup_context"] = string(pkBytes)
 
+		if resp.NextState == "FINISHED" {
+			customerID, _ := session.Metadata["customer_id"].(string)
+
+			var cart []models.OrderItem
+			if cStr := pickSession["cart"]; cStr != "" {
+				json.Unmarshal([]byte(cStr), &cart)
+			}
+			var total float64
+			for _, item := range cart {
+				total += item.Subtotal
+			}
+
+			order := &models.Order{
+				TenantID:        tenant.ID,
+				CustomerID:      customerID,
+				OrderType:       "pickup",
+				Status:          "pending",
+				DeliveryAddress: pickSession["store"], // Guardamos la sede en delivery_address
+				Subtotal:        total,
+				Total:           total,
+				PaymentMethod:   "En tienda",
+				Metadata:        map[string]interface{}{"notes": "Recogida"},
+				Items:           cart,
+			}
+			if err := h.repo.CreateOrder(ctx, order); err != nil {
+				h.log.Error("failed to create pickup order", "err", err)
+			}
+		}
+
 		if resp.NextState == "FINISHED" || resp.NextState == "IDLE" {
 			delete(session.Metadata, "active_agent")
 			delete(session.Metadata, "pickup_context")
@@ -431,6 +460,32 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			if aiReply == "" {
 				return h.sendMainMenu(ctx, tenant, session, msg, "Recogida cancelada. ¿En qué más podemos ayudarte?")
 			}
+		}
+
+		if resp.ShowZoneList {
+			if len(zones) == 0 {
+				aiReply = "No hay sedes configuradas actualmente."
+				return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
+			}
+			var rows []ListRow
+			for _, z := range zones {
+				title := z.Name
+				if len(title) > 24 { title = title[:24] }
+				rows = append(rows, ListRow{
+					ID:          title, // Lo que escribirá el cliente si presiona la opción en la lista
+					Title:       title,
+					Description: "Seleccionar esta sede",
+				})
+			}
+			sections := []ListSection{{Title: "📍 Puntos de Recogida", Rows: rows}}
+			err := SendWhatsAppList(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
+				"Elegir Sede", aiReply, "Elige una opción:", "Ver Opciones", sections)
+			if err != nil {
+				h.log.Error("failed to send pickup zone list", "err", err)
+				return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
+			}
+			session.History = append(session.History, models.AIMessage{Role: "assistant", Content: aiReply})
+			return h.sessions.Save(ctx, session)
 		}
 
 		if len(resp.Buttons) > 0 {
