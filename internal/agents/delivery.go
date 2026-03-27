@@ -56,13 +56,51 @@ func HandleDelivery(
 
 	apiKey := resolveAPIKey()
 
+	// ════════════════════════════════════════════════════════════
+	// GUARDS GLOBALES — se aplican en CUALQUIER estado del flujo
+	// ════════════════════════════════════════════════════════════
+
+	// 1. Botón de otro flujo llegó al agente delivery (ej: menu_recoger, menu_4, menu_update…)
+	//    → El agente redirige al menú principal con explicación, sin abandonar el estado actual
+	if strings.HasPrefix(textNorm, "menu_") && textNorm != "menu_1" {
+		return &DeliveryResponse{
+			Message: "Parece que deseas explorar otra opción 🧭\n\nPara cambiar, primero cancela tu pedido actual con el botón de abajo, o termina tu pedido de domicilio y luego selecciona lo que necesites desde el *Menú Principal*.",
+			NextState:  session.State,
+			NewSession: session,
+			Buttons: []models.InteractiveButton{
+				{ID: "confirm_cancel", Title: "❌ Cancelar pedido"},
+				{ID: "menu_1", Title: "🍕 Ver Carta"},
+			},
+		}
+	}
+
+	// 2. Botón viejo de confirmación de dirección en estado incorrecto → recordatorio suave
+	if (textNorm == "use_reg_addr" || textNorm == "use_new_addr") && session.State != StateDeliveryConfirmingRegisteredAddress {
+		addr := session.Address
+		if addr == "" {
+			addr = "no registrada"
+		}
+		return &DeliveryResponse{
+			Message:    fmt.Sprintf("Ya tenemos registrada tu dirección: *%s*\n\n¿Qué producto deseas agregar?", addr),
+			NextState:  StateDeliveryAwaitingProduct,
+			NewSession: session,
+			Buttons: []models.InteractiveButton{
+				{ID: "menu_1", Title: "🍕 Ver Carta"},
+				{ID: "confirm_cancel", Title: "❌ Cancelar"},
+			},
+		}
+	}
+
+	// ════════════════════════════════════════════════════════════
+	// MÁQUINA DE ESTADOS
+	// ════════════════════════════════════════════════════════════
 	switch session.State {
 	case "", StateDeliveryIdle:
 		if session.Address != "" {
 			session.State = StateDeliveryConfirmingRegisteredAddress
 			return &DeliveryResponse{
-				Message:    fmt.Sprintf("Veo que tienes una dirección registrada: %s. ¿Deseas usarla o prefieres una nueva?", session.Address),
-				NextState:  StateDeliveryConfirmingRegisteredAddress,
+				Message:   fmt.Sprintf("Veo que tienes una dirección registrada: *%s*. ¿Deseas usarla o prefieres una nueva?", session.Address),
+				NextState: StateDeliveryConfirmingRegisteredAddress,
 				NewSession: session,
 				Buttons: []models.InteractiveButton{
 					{ID: "use_reg_addr", Title: "📍 Usar Registrada"},
@@ -73,8 +111,8 @@ func HandleDelivery(
 		}
 		session.State = StateDeliveryAwaitingAddress
 		return &DeliveryResponse{
-			Message:    "¡Claro! ¿A qué dirección enviamos tu pedido?",
-			NextState:  StateDeliveryAwaitingAddress,
+			Message:   "¡Claro! ¿A qué dirección enviamos tu pedido?",
+			NextState: StateDeliveryAwaitingAddress,
 			NewSession: session,
 			Buttons: []models.InteractiveButton{
 				{ID: "confirm_cancel", Title: "❌ Cancelar"},
@@ -85,59 +123,7 @@ func HandleDelivery(
 		if textNorm == "use_reg_addr" {
 			session.State = StateDeliveryAwaitingProduct
 			return &DeliveryResponse{
-				Message:    fmt.Sprintf("Perfecto, enviaremos a: %s. ¿Qué te gustaría pedir?", session.Address),
-				NextState:  StateDeliveryAwaitingProduct,
-				NewSession: session,
-				Buttons: []models.InteractiveButton{
-					{ID: "menu_1", Title: "🍕 Ver Carta"},
-					{ID: "confirm_cancel", Title: "❌ Cancelar"},
-				},
-			}
-		}
-		session.State = StateDeliveryAwaitingAddress
-		return &DeliveryResponse{
-			Message:    "Entendido. ¿A qué dirección enviamos tu pedido entonces?",
-			NextState:  StateDeliveryAwaitingAddress,
-			NewSession: session,
-			Buttons: []models.InteractiveButton{
-				{ID: "confirm_cancel", Title: "❌ Cancelar"},
-			},
-		}
-
-	case StateDeliveryAwaitingAddress:
-		session.Address = userInput
-		session.State = StateDeliveryAwaitingProduct
-		return &DeliveryResponse{
-			Message:    fmt.Sprintf("✅ Dirección guardada: *%s*\n\n¿Qué te gustaría pedir? Escribe el nombre del producto o mira nuestra carta.", session.Address),
-			NextState:  StateDeliveryAwaitingProduct,
-			NewSession: session,
-			Buttons: []models.InteractiveButton{
-				{ID: "menu_1", Title: "🍕 Ver Carta"},
-				{ID: "confirm_cancel", Title: "❌ Cancelar"},
-			},
-		}
-
-	case StateDeliveryAwaitingProduct:
-		// Guard: botones de sistema que no son productos
-		if textNorm == "confirm_cancel" {
-			return &DeliveryResponse{
-				Message:    "",
-				NextState:  StateDeliveryIdle,
-				NewSession: &DeliverySession{State: StateDeliveryIdle},
-			}
-		}
-		// Botones de adición de items al carrito (del upsell)
-		if strings.HasPrefix(textNorm, "menu_") && textNorm != "menu_1" {
-			return &DeliveryResponse{
-				Message:   "",
-				NextState: StateDeliveryIdle,
-				NewSession: &DeliverySession{State: StateDeliveryIdle},
-			}
-		}
-		// El usuario tocó un botón viejo de confirmación de dirección — ignorar y recordarles
-		if textNorm == "use_reg_addr" || textNorm == "use_new_addr" {
-			return &DeliveryResponse{
-				Message:   fmt.Sprintf("¡Listo! Enviaremos tu pedido a: *%s*\n\n¿Qué producto deseas agregar a tu pedido?", session.Address),
+				Message:   fmt.Sprintf("Perfecto, enviaremos a: *%s*\n\n🍕 ¿Qué deseas pedir? Puedes escribir el nombre, pedir una recomendación o ver la carta:", session.Address),
 				NextState: StateDeliveryAwaitingProduct,
 				NewSession: session,
 				Buttons: []models.InteractiveButton{
@@ -146,7 +132,42 @@ func HandleDelivery(
 				},
 			}
 		}
-		// menu_1: mostrar carta inline SIN salir del agente delivery
+		// use_new_addr o cualquier otra respuesta
+		session.State = StateDeliveryAwaitingAddress
+		return &DeliveryResponse{
+			Message:   "Entendido. ¿A qué nueva dirección enviamos tu pedido?",
+			NextState: StateDeliveryAwaitingAddress,
+			NewSession: session,
+			Buttons: []models.InteractiveButton{
+				{ID: "confirm_cancel", Title: "❌ Cancelar"},
+			},
+		}
+
+	case StateDeliveryAwaitingAddress:
+		if textNorm == "" || strings.HasPrefix(textNorm, "use_") {
+			return &DeliveryResponse{
+				Message:   "Por favor escribe la dirección de entrega:",
+				NextState: StateDeliveryAwaitingAddress,
+				NewSession: session,
+				Buttons: []models.InteractiveButton{
+					{ID: "confirm_cancel", Title: "❌ Cancelar"},
+				},
+			}
+		}
+		session.Address = userInput
+		session.State = StateDeliveryAwaitingProduct
+		return &DeliveryResponse{
+			Message:   fmt.Sprintf("✅ Dirección guardada: *%s*\n\n🍕 ¿Qué deseas pedir? Puedes escribir el nombre, pedir recomendación o ver la carta:", session.Address),
+			NextState: StateDeliveryAwaitingProduct,
+			NewSession: session,
+			Buttons: []models.InteractiveButton{
+				{ID: "menu_1", Title: "🍕 Ver Carta"},
+				{ID: "confirm_cancel", Title: "❌ Cancelar"},
+			},
+		}
+
+	case StateDeliveryAwaitingProduct:
+		// menu_1: carta inline sin salir del agente
 		if textNorm == "menu_1" {
 			var sb strings.Builder
 			sb.WriteString("🍕 *Nuestra Carta*\n━━━━━━━━━━━━━━━━━━━━━━\n\n")
@@ -157,26 +178,52 @@ func HandleDelivery(
 				}
 				sb.WriteString("\n")
 			}
-			sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━\nEscribe el nombre del producto que quieres pedir:")
+			sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━\n✍️ Escribe el nombre del producto que quieres pedir:")
 			return &DeliveryResponse{
-				Message:    sb.String(),
-				NextState:  StateDeliveryAwaitingProduct,
+				Message:   sb.String(),
+				NextState: StateDeliveryAwaitingProduct,
 				NewSession: session,
 				Buttons: []models.InteractiveButton{
 					{ID: "confirm_cancel", Title: "❌ Cancelar pedido"},
 				},
 			}
 		}
-		// IA para identificar producto — limitar historial para evitar confusión con la carta
+
+		// Recomendación con IA que conoce el catálogo
+		if IsRecommendationQuery(userInput) {
+			catalogStr := buildDeliveryCatalogPrompt(products, []*models.CoverageZone{})
+			recommendation := AskAIRecommendation(userInput, catalogStr, "nuestra pizzería")
+			if recommendation == "" {
+				recommendation = buildQuickRecommendation(products)
+			}
+			return &DeliveryResponse{
+				Message:   recommendation,
+				NextState: StateDeliveryAwaitingProduct,
+				NewSession: session,
+				Buttons: []models.InteractiveButton{
+					{ID: "menu_1", Title: "🍕 Ver Carta completa"},
+					{ID: "confirm_cancel", Title: "❌ Cancelar"},
+				},
+			}
+		}
+
+		// Intentar identificar producto con IA
 		recentHistory := history
 		if len(recentHistory) > 6 {
 			recentHistory = recentHistory[len(recentHistory)-6:]
 		}
 		productName, quantity, found := pickProductWithAI(userInput, products, recentHistory, apiKey)
+
 		if !found {
+			// Pregunta general o producto no encontrado → IA conversacional con catálogo
+			catalogCtx := buildDeliveryCatalogPrompt(products, []*models.CoverageZone{})
+			aiMsg := askMenuConversationAI(userInput, catalogCtx, session)
+			if aiMsg == "" {
+				aiMsg = "No encontré ese producto. ¿Podrías decirme el nombre exacto? Puedes ver la carta con el botón de abajo."
+			}
 			return &DeliveryResponse{
-				Message:    "No logré identificar ese producto en nuestra carta. ¿Podrías escribir el nombre exactamente como aparece en la carta?",
-				NextState:  StateDeliveryAwaitingProduct,
+				Message:   aiMsg,
+				NextState: StateDeliveryAwaitingProduct,
 				NewSession: session,
 				Buttons: []models.InteractiveButton{
 					{ID: "menu_1", Title: "🍕 Ver Carta"},
@@ -185,7 +232,7 @@ func HandleDelivery(
 			}
 		}
 
-		// Buscar detalles del producto real
+		// Buscar el producto real
 		var selected models.Product
 		for _, p := range products {
 			if strings.EqualFold(p.Name, productName) {
@@ -203,32 +250,30 @@ func HandleDelivery(
 		}
 		session.Cart = append(session.Cart, item)
 		session.Total += item.Subtotal
-
-		// Estado de Upsell (Sugerencia de agrandado)
 		session.State = StateDeliveryUpsell
 		suggested := getUpsellSuggestion(selected, products, history, apiKey)
 		session.SuggestedItem = suggested
-		
-		msg := fmt.Sprintf("¡Excelente! He añadido %d x %s a tu pedido. ", quantity, selected.Name)
+
+		upsellMsg := fmt.Sprintf("¡Excelente! Agregué *%dx %s* ($%.0f) a tu pedido. ", quantity, selected.Name, item.Subtotal)
 		if suggested != nil {
-			msg += fmt.Sprintf("¿Te gustaría acompañarlo con %s por solo $%.0f adicionales?", suggested.Name, suggested.Price)
+			upsellMsg += fmt.Sprintf("¿Te gustaría acompañarlo con *%s* por solo *$%.0f* adicionales?", suggested.Name, suggested.Price)
 		} else {
-			msg += "¿Deseas algo más?"
+			upsellMsg += "¿Deseas agregar algo más?"
 		}
 
 		return &DeliveryResponse{
-			Message:    msg,
-			NextState:  StateDeliveryUpsell,
+			Message:   upsellMsg,
+			NextState: StateDeliveryUpsell,
 			NewSession: session,
 			Buttons: []models.InteractiveButton{
-				{ID: "upsell_yes", Title: "✅ ¡Sí, genial!"},
-				{ID: "upsell_no", Title: "👎 No, gracias"},
+				{ID: "upsell_yes", Title: "✅ ¡Sí, agregar!"},
+				{ID: "upsell_no", Title: "👎 No, continuar"},
 				{ID: "confirm_cancel", Title: "❌ Cancelar"},
 			},
 		}
 
 	case StateDeliveryUpsell:
-		upsellAccepted := textNorm == "upsell_yes" || textNorm == "upsell yes" || isPositive(userInput)
+		upsellAccepted := textNorm == "upsell_yes" || isPositive(userInput)
 		if upsellAccepted && session.SuggestedItem != nil {
 			item := models.OrderItem{
 				ProductID: &session.SuggestedItem.ID,
@@ -239,22 +284,42 @@ func HandleDelivery(
 			}
 			session.Cart = append(session.Cart, item)
 			session.Total += item.Subtotal
-			session.SuggestedItem = nil // Limpiar sugerencia ya usada
+			session.SuggestedItem = nil
 		}
-		
+
 		session.State = StateDeliveryConfirmingOrder
 		return &DeliveryResponse{
-			Message:    fmt.Sprintf("Entendido. Tu pedido actual es: %s por un total de $%.0f. ¿Confirmas tu pedido? (Si/No)", renderCart(session.Cart), session.Total),
+			Message: fmt.Sprintf(
+				"📝 *Resumen de tu pedido*\n━━━━━━━━━━━━━━━━\n%s\n─────────────────────\n💰 *Total: $%.0f*\n📍 Dirección: *%s*\n\n¿Confirmas?",
+				renderCart(session.Cart), session.Total, session.Address,
+			),
 			NextState:  StateDeliveryConfirmingOrder,
 			NewSession: session,
+			Buttons: []models.InteractiveButton{
+				{ID: "confirm_ok", Title: "✅ Confirmar pedido"},
+				{ID: "confirm_add", Title: "➕ Agregar más"},
+				{ID: "confirm_cancel", Title: "❌ Cancelar"},
+			},
 		}
 
 	case StateDeliveryConfirmingOrder:
+		if textNorm == "confirm_add" {
+			session.State = StateDeliveryAwaitingProduct
+			return &DeliveryResponse{
+				Message:   "¿Qué más deseas agregar?",
+				NextState: StateDeliveryAwaitingProduct,
+				NewSession: session,
+				Buttons: []models.InteractiveButton{
+					{ID: "menu_1", Title: "🍕 Ver Carta"},
+					{ID: "confirm_cancel", Title: "❌ Cancelar"},
+				},
+			}
+		}
 		if textNorm == "confirm_ok" || isPositive(userInput) {
 			session.State = StateDeliveryPayment
 			return &DeliveryResponse{
-				Message:    "¡Perfecto! ¿Cómo deseas pagar?",
-				NextState:  StateDeliveryPayment,
+				Message:   "💳 ¿Cómo deseas pagar?",
+				NextState: StateDeliveryPayment,
 				NewSession: session,
 				Buttons: []models.InteractiveButton{
 					{ID: "cash", Title: "💵 Efectivo"},
@@ -265,18 +330,18 @@ func HandleDelivery(
 		}
 		if textNorm == "confirm_cancel" || isNegative(userInput) {
 			return &DeliveryResponse{
-				Message:    "Pedido cancelado. ¿Hay algo más en lo que pueda ayudarte?",
-				NextState:  StateDeliveryIdle,
+				Message:   "Pedido cancelado. ¡Espero verte pronto! 🍕",
+				NextState: StateDeliveryIdle,
 				NewSession: &DeliverySession{State: StateDeliveryIdle},
 			}
 		}
 		return &DeliveryResponse{
-			Message:    "Por favor, confirma tu pedido.",
-			NextState:  StateDeliveryConfirmingOrder,
+			Message:   "Por favor confirma tu pedido:",
+			NextState: StateDeliveryConfirmingOrder,
 			NewSession: session,
 			Buttons: []models.InteractiveButton{
 				{ID: "confirm_ok", Title: "✅ Confirmar"},
-				{ID: "confirm_edit", Title: "✏️ Editar"},
+				{ID: "confirm_add", Title: "➕ Agregar más"},
 				{ID: "confirm_cancel", Title: "❌ Cancelar"},
 			},
 		}
@@ -285,22 +350,22 @@ func HandleDelivery(
 		if textNorm == "cash" || strings.Contains(textNorm, "efectivo") {
 			session.State = StateDeliveryPlaced
 			return &DeliveryResponse{
-				Message:    "✅ Pago en Efectivo registrado. Estamos procesando tu orden... ¡Llegará pronto!",
-				NextState:  StateDeliveryPlaced,
+				Message:   "✅ *¡Pedido confirmado!*\n\nPago en Efectivo registrado. Tu pedido está en camino 🛵\n\n¡Gracias por elegirnos!",
+				NextState: StateDeliveryPlaced,
 				NewSession: session,
 			}
 		}
 		if textNorm == "transfer" || strings.Contains(textNorm, "transferencia") {
 			session.State = StateDeliveryPlaced
 			return &DeliveryResponse{
-				Message:    "✅ Pago por Transferencia registrado. Por favor envía el comprobante por aquí. Estamos procesando tu orden... ¡Llegará pronto!",
-				NextState:  StateDeliveryPlaced,
+				Message:   "✅ *¡Pedido confirmado!*\n\nPago por Transferencia registrado. Por favor envía el comprobante. Tu pedido está en camino 🛵\n\n¡Gracias por elegirnos!",
+				NextState: StateDeliveryPlaced,
 				NewSession: session,
 			}
 		}
 		return &DeliveryResponse{
-			Message:    "Por favor, indica tu método de pago.",
-			NextState:  StateDeliveryPayment,
+			Message:   "Por favor indica tu método de pago:",
+			NextState: StateDeliveryPayment,
 			NewSession: session,
 			Buttons: []models.InteractiveButton{
 				{ID: "cash", Title: "💵 Efectivo"},
@@ -311,12 +376,64 @@ func HandleDelivery(
 
 	default:
 		return &DeliveryResponse{
-			Message:    "Lo siento, hubo un error en el flujo. ¿Podrías decirme tu dirección de nuevo?",
-			NextState:  StateDeliveryAwaitingAddress,
+			Message:   "Hubo un error en el flujo. ¿A qué dirección enviamos tu pedido?",
+			NextState: StateDeliveryAwaitingAddress,
 			NewSession: &DeliverySession{State: StateDeliveryAwaitingAddress},
 		}
 	}
 }
+
+// buildDeliveryCatalogPrompt construye el contexto de catálogo para la IA de domicilios
+func buildDeliveryCatalogPrompt(products []models.Product, zones []*models.CoverageZone) string {
+	var sb strings.Builder
+	if len(products) > 0 {
+		sb.WriteString("PRODUCTOS DISPONIBLES:\n")
+		for _, p := range products {
+			sb.WriteString(fmt.Sprintf("• %s: $%.0f", p.Name, p.Price))
+			if p.Description != nil && *p.Description != "" {
+				sb.WriteString(fmt.Sprintf(" — %s", *p.Description))
+			}
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
+}
+
+// askMenuConversationAI responde preguntas generales sobre el menú dentro del flujo de delivery
+func askMenuConversationAI(userInput, catalogCtx string, session *DeliverySession) string {
+	systemPrompt := fmt.Sprintf(`Eres el asistente de pedidos a domicilio. El cliente está en proceso de hacer un pedido.
+Dirección actual: %s
+Carrito actual: %s
+
+Puedes:
+- Responder preguntas sobre productos, ingredientes, precios
+- Recomendar productos de la carta
+- Ayudar a elegir qué pedir
+
+Si el cliente quiere cambiar a "recoger en tienda" u otro servicio distinto, dile amablemente:
+"Para eso, primero cancela este pedido o complétalo, y luego selecciona la opción desde el Menú Principal."
+
+Sé conciso. Máximo 2-3 oraciones.
+
+%s`, session.Address, renderCart(session.Cart), catalogCtx)
+
+	return callGroqAI(systemPrompt, userInput, 200)
+}
+
+// buildQuickRecommendation hace recomendación rápida sin IA cuando no hay clave API
+func buildQuickRecommendation(products []models.Product) string {
+	for _, p := range products {
+		if strings.Contains(strings.ToLower(p.Name), "pizza") {
+			return fmt.Sprintf("¡Te recomiendo nuestra *%s* ($%.0f)! Es una de las favoritas 🍕 ¿La incluyo en tu pedido?", p.Name, p.Price)
+		}
+	}
+	if len(products) > 0 {
+		return fmt.Sprintf("¡Te recomiendo *%s* ($%.0f)! Es excelente opción.", products[0].Name, products[0].Price)
+	}
+	return "¡Todo está delicioso! Mira la carta y dime qué te apetece."
+}
+
+
 
 func pickProductWithAI(input string, products []models.Product, history []models.AIMessage, apiKey string) (string, int, bool) {
 	if apiKey == "" {

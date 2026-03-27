@@ -134,37 +134,38 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 
 	activeAgent, _ := session.Metadata["active_agent"].(string)
 
-	// Detección global de intenciones de regresar al menú o navegar fuera de un agente.
+	// ── Salidas forzadas: siempre funcionan, en cualquier agente ─────────────────
+	// Solo menu_principal y confirm_cancel pueden cambiar/cerrar un agente activo.
+	// Esto evita que botones de mensajes viejos cambien el flujo accidentalmente.
 	wantsReset := strings.Contains(textNorm, "finalizar") ||
 		strings.Contains(textNorm, "reiniciar") ||
 		strings.Contains(textNorm, "reset") ||
 		strings.Contains(textNorm, "empezar de nuevo") ||
 		strings.Contains(textNorm, "nueva sesion")
 
-	// Interceptor de Botones Reservados (menu_, confirm_cancel, MENU_PRINCIPAL, etc)
-	// NOTA: use_reg_addr y use_new_addr NO van aquí — los maneja el agente delivery internamente.
-	isMenuCommand := strings.HasPrefix(textNorm, "menu_") ||
+	isHardExit := wantsReset ||
 		textNorm == "confirm_cancel" ||
-		textNorm == "menu principal" ||
 		textNorm == "menu_principal" ||
-		textNorm == "confirm_addr_yes" ||
-		textNorm == "confirm_addr_no"
+		textNorm == "menu principal" ||
+		textNorm == "menú principal"
 
-	wantsExit := wantsReset ||
-		isMenuCommand ||
+	// ── Salidas suaves: solo cuando NO hay agente activo ─────────────────────────
+	// Cuando hay un agente, los botones de otros flujos van AL agente (no lo reemplazan).
+	isSoftExit := !isHardExit && activeAgent == "" && (
+		strings.HasPrefix(textNorm, "menu_") ||
+		textNorm == "confirm_addr_yes" ||
+		textNorm == "confirm_addr_no" ||
 		strings.Contains(textNorm, "volver") ||
 		strings.Contains(textNorm, "salir") ||
-		strings.Contains(textNorm, "cancelar") ||
-		// En SAC, los números de menú también actúan como salida de emergencia.
-		(activeAgent == "sac" && (textNorm == "1" || textNorm == "2" || textNorm == "3" || textNorm == "4" || strings.Contains(textNorm, "menu") || strings.Contains(textNorm, "opciones")))
+		strings.Contains(textNorm, "cancelar"))
+
+	wantsExit := isHardExit || isSoftExit
 
 	if wantsExit {
 		activeAgent = ""
 		delete(session.Metadata, "active_agent")
 		if wantsReset {
-			// Limpiar historial para empezar de cero
 			session.History = []models.AIMessage{}
-			// Limpiar estados específicos de agentes
 			delete(session.Metadata, "orderval_state")
 			delete(session.Metadata, "orderval_context")
 			delete(session.Metadata, "registration_state")
@@ -290,6 +291,10 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 	// ── 4. Enrutar al agente activo ────────────────────────────────────────────
 	switch activeAgent {
 	case "orderval":
+		// Si recibe un botón de otro flujo, redirigir al menú principal
+		if strings.HasPrefix(textNorm, "menu_") {
+			return h.sendMainMenu(ctx, tenant, session, msg, "Para consultar otra opción, seleccionándola desde aquí:")
+		}
 		records, err := h.repo.GetActiveOrdersByPhone(ctx, tenant.ID, msg.From)
 		if err != nil {
 			h.log.Error("error getting orders", "err", err)
@@ -310,13 +315,15 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			delete(session.Metadata, "active_agent")
 		}
 	case "sac":
-		// Ignorar comandos de sistema que no son mensajes reales del usuario
-		if textNorm == "" || strings.HasPrefix(textNorm, "menu_") || textNorm == "confirm_cancel" {
-			aiReply = "🎧 *Soporte y PQR*\n\nEstoy aquí para ayudarte. Por favor cuéntame: ¿Cuál es tu consulta, queja o sugerencia?"
+		// Comandos de menú de otros flujos: el SAC explica cómo cambiar
+		if strings.HasPrefix(textNorm, "menu_") {
+			aiReply = "Estoy aquí en *Soporte (PQR)* para ayudarte con tu consulta 💬\n\nSi quieres explorar otra opción del menú, ve al *Menú Principal*."
+		} else if textNorm == "" {
+			aiReply = "🎧 *Soporte y PQR*\n\nEstoy aquí para ayudarte. Cuéntame tu consulta, queja o sugerencia."
 		} else {
 			aiReply = agents.HandleSAC(msg.Text)
 		}
-		// SAC: enviar siempre con botón de menú principal
+		// SAC: siempre con botón de menú principal
 		err := SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
 			"", aiReply, "", []models.InteractiveButton{
 				{ID: "menu_principal", Title: "🏠 Menú Principal"},
