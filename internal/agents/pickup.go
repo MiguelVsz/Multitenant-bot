@@ -1,10 +1,14 @@
 package agents
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"multi-tenant-bot/internal/models"
+	"net/http"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -45,105 +49,80 @@ func HandlePickup(
 
 	switch currentState {
 	case "IDLE", "":
-		res.Message = "🥡 *Recoger en Tienda*\n━━━━━━━━━━━━━━━━\n\n¡Perfecto! ¿En qué *ciudad* te encuentras para mostrarte los puntos de recogida disponibles?"
-		res.NextState = StatePickupAwaitingCity
-		res.Buttons = []models.InteractiveButton{menuBtn}
-
-	case StatePickupAwaitingCity:
-		city := strings.TrimSpace(userInput)
-		context["city"] = city
-		matched := filterZonesByCity(zones, city)
-		if len(matched) == 0 {
-			matched = zones
+		res.Message = "🥡 *Recoger en Tienda*\n━━━━━━━━━━━━━━━━\n\n¡Perfecto! ¿En qué *sede o ciudad* te gustaría recoger tu pedido?"
+		res.NextState = "PICKUP_AWAITING_LOCATION"
+		res.Buttons = []models.InteractiveButton{
+			{ID: "confirm_cancel", Title: "❌ Cancelar pedido"},
 		}
-		if len(matched) == 0 {
-			res.Message = "Lo siento, no encontré puntos de recogida disponibles. Por favor contacta soporte."
+
+	case "PICKUP_AWAITING_LOCATION":
+		// Guard: botones
+		if strings.HasPrefix(normalizeText(userInput), "menu_") || userInput == "confirm_cancel" {
+			res.Message = "Entendido, consulta cancelada."
 			res.NextState = "IDLE"
+			return res
+		}
+
+		recentHistory := []models.AIMessage{}
+
+		action, aiMsg, storeName := processPickupLocationAI(userInput, zones, recentHistory, apiKey)
+
+		if action == "reply" {
+			res.Message = aiMsg
+			res.NextState = "PICKUP_AWAITING_LOCATION"
 			res.Buttons = []models.InteractiveButton{
-				{ID: "menu_4", Title: "🎧 Ir a Soporte"},
-				menuBtn,
+				{ID: "confirm_cancel", Title: "❌ Cancelar"},
 			}
 			res.NewContext = context
 			return res
 		}
 
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("🏪 Puntos de recogida disponibles cerca de *%s*:\n", city))
-		sb.WriteString("─────────────────────\n\n")
-
-		var storeIDs, storeNames []string
-		for i, z := range matched {
-			sb.WriteString(fmt.Sprintf("%d️⃣ *%s*\n", i+1, z.Name))
-			storeIDs = append(storeIDs, z.ID)
-			storeNames = append(storeNames, z.Name)
-		}
-		sb.WriteString("\n¿En cuál de ellos quieres recoger? (Responde con el número)")
-
-		context["store_ids"] = strings.Join(storeIDs, "|")
-		context["store_names"] = strings.Join(storeNames, "|")
-		res.Message = sb.String()
-		res.NextState = StatePickupAwaitingStore
-		res.Buttons = []models.InteractiveButton{menuBtn}
-
-	case StatePickupAwaitingStore:
-		storeNamesList := strings.Split(context["store_names"], "|")
-		storeName := strings.TrimSpace(userInput)
-
-		idx := 0
-		fmt.Sscanf(strings.TrimSpace(userInput), "%d", &idx)
-		if idx > 0 && idx <= len(storeNamesList) {
-			storeName = storeNamesList[idx-1]
-		} else {
-			for _, name := range storeNamesList {
-				if strings.Contains(normalizeText(name), normalizeText(userInput)) ||
-					strings.Contains(normalizeText(userInput), normalizeText(name)) {
-					storeName = name
-					break
-				}
+		// Validar si la sede existe
+		var matchedZone *models.CoverageZone
+		for i, z := range zones {
+			if strings.EqualFold(z.Name, storeName) {
+				matchedZone = &zones[i]
+				break
 			}
 		}
 
-		context["store"] = storeName
-		res.Message = fmt.Sprintf("📍 Has seleccionado: *%s*\n\n¿Confirmas que recogerás aquí tu pedido?", storeName)
-		res.NextState = StatePickupConfirmingStore
+		if matchedZone == nil {
+			// Fallback si la IA se equivoca
+			res.Message = aiMsg + "\n(Pero no encuentro exactamente esa sede en mi sistema. ¿Puedes confirmar el nombre o elegir otra?)"
+			res.NextState = "PICKUP_AWAITING_LOCATION"
+			res.Buttons = []models.InteractiveButton{
+				{ID: "confirm_cancel", Title: "❌ Cancelar"},
+			}
+			res.NewContext = context
+			return res
+		}
+
+		context["store"] = matchedZone.Name
+		context["city"] = "local" // Opcional
+		
+		finalMsg := aiMsg
+		if finalMsg == "" {
+			finalMsg = fmt.Sprintf("✅ ¡Sede confirmada: %s!", matchedZone.Name)
+		}
+		
+		res.Message = fmt.Sprintf("%s\n\n🍕 ¿Qué deseas pedir? Escríbelo, pídeme recomendaciones o dime qué se te antoja:", finalMsg)
+		res.NextState = StatePickupAwaitingProduct
 		res.Buttons = []models.InteractiveButton{
-			{ID: "pickup_confirm_store", Title: "✅ Sí, confirmar"},
-			{ID: "pickup_change_store", Title: "🔄 Cambiar punto"},
-			menuBtn,
-		}
-
-	case StatePickupConfirmingStore:
-		tn := normalizeText(userInput)
-		if tn == "pickup_confirm_store" || isPositive(userInput) {
-			// Cargar catálogo en contexto para la IA de pickup
-			context["catalog"] = buildProductCatalogString(products)
-			res.Message = fmt.Sprintf(
-				"✅ Perfecto. Tu pedido será para recoger en *%s*.\n\n🍕 ¿Qué deseas pedir? Puedes escribir el nombre del producto, pedir una recomendación o ver la carta:",
-				context["store"],
-			)
-			res.NextState = StatePickupAwaitingProduct
-			res.Buttons = []models.InteractiveButton{
-				{ID: "menu_1", Title: "🍕 Ver Carta"},
-				menuBtn,
-			}
-		} else if userInput == "pickup_change_store" || isNegative(userInput) {
-			res.Message = "Sin problema. ¿En qué ciudad buscas el punto de recogida?"
-			res.NextState = StatePickupAwaitingCity
-			delete(context, "store")
-			res.Buttons = []models.InteractiveButton{menuBtn}
-		} else {
-			res.Message = fmt.Sprintf("¿Confirmas recoger en *%s*?", context["store"])
-			res.NextState = StatePickupConfirmingStore
-			res.Buttons = []models.InteractiveButton{
-				{ID: "pickup_confirm_store", Title: "✅ Sí, confirmar"},
-				{ID: "pickup_change_store", Title: "🔄 Cambiar punto"},
-				menuBtn,
-			}
+			{ID: "confirm_cancel", Title: "❌ Cancelar"},
 		}
 
 	case StatePickupAwaitingProduct:
 		// Guard: comandos de sistema
-		if strings.HasPrefix(normalizeText(userInput), "menu_") || userInput == "menu_principal" {
+		if strings.HasPrefix(normalizeText(userInput), "menu_") && userInput != "menu_1" {
+			res.Message = "Parece que deseas explorar otra opción 🧭\n\nPara cambiar, primero cancela tu pedido actual con el botón de abajo."
+			res.NextState = currentState
+			res.NewContext = context
+			res.Buttons = []models.InteractiveButton{
+				{ID: "confirm_cancel", Title: "❌ Cancelar pedido"},
+			}
+			return res
+		}
+		if userInput == "menu_principal" || userInput == "confirm_cancel" {
 			res.Message = ""
 			res.NextState = "IDLE"
 			res.NewContext = context
@@ -290,6 +269,93 @@ func HandlePickup(
 
 	res.NewContext = context
 	return res
+}
+
+// processPickupLocationAI es el Agente Maestro para entender el punto de recogida seleccionado por el usuario.
+// Retorna la acción ("reply" o "set_store") y el nombre confirmado del CoverageZone si elige uno.
+func processPickupLocationAI(input string, zones []models.CoverageZone, history []models.AIMessage, apiKey string) (action, message, storeName string) {
+	if apiKey == "" {
+		return "reply", "No tengo IA configurada. Especifica el lugar.", ""
+	}
+
+	var zonesInfo strings.Builder
+	for _, z := range zones {
+		zonesInfo.WriteString(fmt.Sprintf("- %s\n", z.Name))
+	}
+
+	prompt := fmt.Sprintf(`Eres el encargado de puntos de recogida de una pizzería/restaurante. El usuario quiere recoger un pedido.
+
+Tu objetivo es entender en qué CIUDAD o SEDE desea recoger su pedido.
+Nuestras sedes disponibles son:
+%s
+
+Debes responder estrictamente en formato JSON:
+{
+  "action": "reply" | "set_store",
+  "message": "Mensaje para responder o confirmar",
+  "store": "Nombre exacto de la sede (si set_store)"
+}
+
+REGLAS:
+1. Si el usuario pregunta qué sedes hay, saluda, o dice una ciudad general donde tenemos múltiples sedes, usa action="reply" y nómbrale fluidamente las sedes disponibles.
+2. Si el usuario escoge o nombra inequívocamente una sede de nuestra lista (ej: "Sede Norte", "en la norte", "la primera"), usa action="set_store" y pon en "store" el NOMBRE EXACTO de la sede de nuestra lista. En "message" puedes poner algo muy breve o dejarlo vacío (ej: "¡Perfecto!").
+3. NUNCA inventes sedes. SOLO puedes usar las de la lista proporcionada.
+4. Si menciona una ciudad, revisa cuántas sedes hay daar y ayúdalo a escoger respondiendo con action="reply".
+
+Responde SOLO valid JSON.`, zonesInfo.String())
+
+	messages := []map[string]string{
+		{"role": "system", "content": prompt},
+	}
+	
+	for _, h := range history {
+		role := h.Role
+		if role == "assistant" { role = "assistant" }
+		messages = append(messages, map[string]string{"role": role, "content": h.Content})
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": input})
+
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"model": "llama-3.3-70b-versatile",
+		"messages": messages,
+		"response_format": map[string]string{"type": "json_object"},
+		"temperature": 0.4,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.groq.com/openai/v1/chat/completions", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 { 
+		return "reply", "Tuve un problema. ¿Me podrías decir de nuevo qué sede prefieres?", "" 
+	}
+	defer resp.Body.Close()
+
+	var resData struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	json.NewDecoder(resp.Body).Decode(&resData)
+
+	var data struct {
+		Action  string `json:"action"`
+		Message string `json:"message"`
+		Store   string `json:"store"`
+	}
+	err = json.Unmarshal([]byte(resData.Choices[0].Message.Content), &data)
+	if err != nil {
+		return "reply", "¿Me confirmas el nombre de la sede, por favor?", ""
+	}
+
+	if data.Action == "" { data.Action = "reply" }
+	return data.Action, data.Message, data.Store
 }
 
 // buildProductCatalogString construye un string legible con el catálogo de productos
