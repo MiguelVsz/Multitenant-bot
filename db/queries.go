@@ -62,4 +62,24 @@ RETURNING id, created_at`
 	QueryCreateOrderItem = `
 INSERT INTO gobot.order_items (order_id, product_id, name, unit_price, quantity, subtotal)
 VALUES ($1, $2, $3, $4, $5, $6)`
+
+	QueryUpdateCustomerName = `
+UPDATE gobot.customers
+SET name = $3, updated_at = NOW()
+WHERE tenant_id = $1 AND id = $2`
+
+	QueryUpdateCustomerEmail = `
+UPDATE gobot.customers
+SET email = $3, updated_at = NOW()
+WHERE tenant_id = $1 AND id = $2`
+
+	QueryUpdateCustomerAddress = `
+UPDATE gobot.customers
+SET default_address = $3, metadata = metadata || jsonb_build_object('address', $3), updated_at = NOW()
+WHERE tenant_id = $1 AND id = $2`
+
+	QueryUpdateCustomerPhone = `
+UPDATE gobot.customers
+SET metadata = metadata || jsonb_build_object('phone', $3), updated_at = NOW()
+WHERE tenant_id = $1 AND id = $2`
 )

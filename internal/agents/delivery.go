@@ -118,12 +118,53 @@ func HandleDelivery(
 		}
 
 	case StateDeliveryAwaitingProduct:
-		// Interceptar cancelaciones y comandos de menú directamente
-		if textNorm == "confirm_cancel" || strings.HasPrefix(textNorm, "menu_") {
+		// Guard: botones de sistema que no son productos
+		if textNorm == "confirm_cancel" {
+			return &DeliveryResponse{
+				Message:    "",
+				NextState:  StateDeliveryIdle,
+				NewSession: &DeliverySession{State: StateDeliveryIdle},
+			}
+		}
+		// Botones de adición de items al carrito (del upsell)
+		if strings.HasPrefix(textNorm, "menu_") && textNorm != "menu_1" {
 			return &DeliveryResponse{
 				Message:   "",
 				NextState: StateDeliveryIdle,
 				NewSession: &DeliverySession{State: StateDeliveryIdle},
+			}
+		}
+		// El usuario tocó un botón viejo de confirmación de dirección — ignorar y recordarles
+		if textNorm == "use_reg_addr" || textNorm == "use_new_addr" {
+			return &DeliveryResponse{
+				Message:   fmt.Sprintf("¡Listo! Enviaremos tu pedido a: *%s*\n\n¿Qué producto deseas agregar a tu pedido?", session.Address),
+				NextState: StateDeliveryAwaitingProduct,
+				NewSession: session,
+				Buttons: []models.InteractiveButton{
+					{ID: "menu_1", Title: "🍕 Ver Carta"},
+					{ID: "confirm_cancel", Title: "❌ Cancelar"},
+				},
+			}
+		}
+		// menu_1: mostrar carta inline SIN salir del agente delivery
+		if textNorm == "menu_1" {
+			var sb strings.Builder
+			sb.WriteString("🍕 *Nuestra Carta*\n━━━━━━━━━━━━━━━━━━━━━━\n\n")
+			for _, p := range products {
+				sb.WriteString(fmt.Sprintf("*%s* — $%.0f\n", p.Name, p.Price))
+				if p.Description != nil && *p.Description != "" {
+					sb.WriteString(fmt.Sprintf("  _%s_\n", *p.Description))
+				}
+				sb.WriteString("\n")
+			}
+			sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━\nEscribe el nombre del producto que quieres pedir:")
+			return &DeliveryResponse{
+				Message:    sb.String(),
+				NextState:  StateDeliveryAwaitingProduct,
+				NewSession: session,
+				Buttons: []models.InteractiveButton{
+					{ID: "confirm_cancel", Title: "❌ Cancelar pedido"},
+				},
 			}
 		}
 		// IA para identificar producto — limitar historial para evitar confusión con la carta

@@ -316,6 +316,17 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		} else {
 			aiReply = agents.HandleSAC(msg.Text)
 		}
+		// SAC: enviar siempre con botón de menú principal
+		err := SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
+			"", aiReply, "", []models.InteractiveButton{
+				{ID: "menu_principal", Title: "🏠 Menú Principal"},
+			})
+		if err != nil {
+			h.log.Error("failed to send sac button", "err", err)
+			return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
+		}
+		session.History = append(session.History, models.AIMessage{Role: "assistant", Content: aiReply})
+		return h.sessions.Save(ctx, session)
 	case "delivery":
 		var delSession agents.DeliverySession
 		if dsVal := session.Metadata["delivery_context"]; dsVal != nil {
@@ -348,6 +359,7 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 				h.log.Error("failed to send delivery buttons", "err", err)
 				return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
 			}
+			session.History = append(session.History, models.AIMessage{Role: "assistant", Content: aiReply})
 			return h.sessions.Save(ctx, session)
 		}
 
@@ -439,6 +451,37 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 
 		udState, _ := session.Metadata["update_data_state"].(string)
 		resp := agents.HandleUpdateData(msg.Text, udState, mustMarshalContext(udSession))
+
+		// UPDATE_APPLY: hacer el update real en la BD
+		if resp.NextState == agents.StateUpdateApply {
+			fieldToUpdate := udSession["field_to_update"]
+			newValue := udSession["new_value"]
+			fieldLabel := udSession["field_label"]
+			customerID := udSession["customer_id"]
+
+			moreBtn := []models.InteractiveButton{
+				{ID: "upd_field_1", Title: "1 Nombre"},
+				{ID: "upd_field_4", Title: "4 Direccion"},
+				{ID: "menu_principal", Title: "Menu Principal"},
+			}
+			if err := h.repo.UpdateCustomerField(ctx, tenant.ID, customerID, fieldToUpdate, newValue); err != nil {
+				h.log.Error("failed to update customer field", "field", fieldToUpdate, "err", err)
+				aiReply = fmt.Sprintf("Lo siento, no pudimos actualizar tu *%s*. Por favor intenta mas tarde.", fieldLabel)
+			} else {
+				aiReply = fmt.Sprintf("Tu *%s* fue actualizado a *%s*. Deseas modificar otro dato?", fieldLabel, newValue)
+				session.Metadata["update_data_state"] = agents.StateUpdateSelectField
+				if fieldToUpdate == "name" {
+					session.Metadata["customer_name"] = newValue
+				} else if fieldToUpdate == "address" {
+					session.Metadata["customer_address"] = newValue
+				}
+			}
+			udBytes, _ := json.Marshal(resp.NewContext)
+			session.Metadata["update_data_context"] = string(udBytes)
+			_ = SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken, "", aiReply, "", moreBtn)
+			session.History = append(session.History, models.AIMessage{Role: "assistant", Content: aiReply})
+			return h.sessions.Save(ctx, session)
+		}
 
 		aiReply = resp.Message
 		session.Metadata["update_data_state"] = resp.NextState
@@ -558,6 +601,38 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			} else if len(products) == 0 {
 				aiReply = "Actualmente no tenemos productos disponibles en la carta."
 			} else {
+				// Detectar si el usuario quiere una recomendación IA
+				inputLower := strings.ToLower(strings.TrimSpace(msg.Text))
+				isRecomendacion := strings.Contains(inputLower, "recomi") ||
+					strings.Contains(inputLower, "sugi") ||
+					strings.Contains(inputLower, "qu") && strings.Contains(inputLower, "pedir") ||
+					strings.Contains(inputLower, "qu") && strings.Contains(inputLower, "elijo")
+
+				if isRecomendacion && len(products) > 0 {
+					// Usar IA para recomendar producto
+					var productList strings.Builder
+					for _, p := range products {
+						productList.WriteString(fmt.Sprintf("- %s: $%.0f", p.Name, p.Price))
+						if p.Description != nil && *p.Description != "" {
+							productList.WriteString(" (" + *p.Description + ")")
+						}
+						productList.WriteString("\n")
+					}
+					aiReply = agents.AskAIRecommendation(msg.Text, productList.String(), tenant.Name)
+					buttons := []models.InteractiveButton{
+						{ID: "menu_domicilio", Title: "🛵 Pedir a Domicilio"},
+						{ID: "menu_recoger", Title: "🥡 Recoger en Tienda"},
+						{ID: "menu_principal", Title: "🏠 Menú Principal"},
+					}
+					err := SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
+						"Recomendación", aiReply, "", buttons)
+					if err != nil {
+						return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
+					}
+					session.History = append(session.History, models.AIMessage{Role: "assistant", Content: aiReply})
+					return h.sessions.Save(ctx, session)
+				}
+
 				var sb strings.Builder
 				sb.WriteString("🍕 *CARTA " + strings.ToUpper(tenant.Name) + "* 🍕\n")
 				sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━\n\n")
@@ -608,6 +683,7 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 					h.log.Error("failed to send carta buttons", "err", err)
 					return h.finalizeMessage(ctx, tenant, session, msg, sb.String())
 				}
+				session.History = append(session.History, models.AIMessage{Role: "assistant", Content: sb.String()})
 				return h.sessions.Save(ctx, session)
 			}
 		case agents.RouteIntentLocations:

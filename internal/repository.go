@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"multi-tenant-bot/db"
@@ -173,6 +174,27 @@ func (r *Repository) UpdateCustomerMetadata(ctx context.Context, tenantID string
 	_, err := r.db.Exec(ctx, db.QueryUpdateCustomerMetadata, tenantID, phone, metadataJSON)
 	return err
 }
+
+// UpdateCustomerField actualiza un campo específico del cliente directamente en la BD.
+// field puede ser: "name", "email", "address", "phone"
+func (r *Repository) UpdateCustomerField(ctx context.Context, tenantID, customerID, field, value string) error {
+	var query string
+	switch field {
+	case "name":
+		query = db.QueryUpdateCustomerName
+	case "email":
+		query = db.QueryUpdateCustomerEmail
+	case "address":
+		query = db.QueryUpdateCustomerAddress
+	case "phone":
+		query = db.QueryUpdateCustomerPhone
+	default:
+		return fmt.Errorf("campo desconocido: %s", field)
+	}
+	_, err := r.db.Exec(ctx, query, tenantID, customerID, value)
+	return err
+}
+
 
 func (r *Repository) CreateOrder(ctx context.Context, o *models.Order) error {
 	tx, err := r.db.Begin(ctx)
