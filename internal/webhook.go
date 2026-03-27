@@ -116,7 +116,7 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 	}
 
 	if session.Metadata == nil {
-		session.Metadata = make(map[string]string)
+		session.Metadata = make(map[string]interface{})
 	}
 	session.Metadata["last_message_id"] = msg.MessageID
 	session.Metadata["last_message_type"] = msg.Type
@@ -132,7 +132,7 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 	textNorm := strings.ReplaceAll(textLower, "ú", "u")
 	textNorm = strings.ReplaceAll(textNorm, "í", "i")
 	
-	activeAgent := session.Metadata["active_agent"]
+	activeAgent, _ := session.Metadata["active_agent"].(string)
 
 	// Detección global de intenciones de regresar al menú o navegar fuera de un agente.
 	wantsReset := strings.Contains(textNorm, "finalizar") ||
@@ -164,29 +164,22 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 	}
 
 	// 1. Verificar consentimiento de datos
-	if session.Metadata["data_treatment_accepted"] != "si" {
+	accepted, _ := session.Metadata["data_treatment_accepted"].(string)
+	if accepted != "si" {
 		switch textNorm {
 		case "accepted":
 			session.Metadata["data_treatment_accepted"] = "si"
-			// Continuar al chequeo de registro inmediatamente
+			// Si el cliente ya existe, persistir actualización inmediatamente
+			if customerID, ok := session.Metadata["customer_id"].(string); ok && customerID != "" {
+				_ = h.repo.UpdateCustomerMetadata(ctx, tenant.ID, msg.From, session.Metadata)
+			}
 		case "declined":
 			aiReply = "Entendido. Sin la aceptación del tratamiento de datos no podemos continuar con la atención. Si cambias de opinión, escribe 'Hola'. ¡Hasta luego!"
 			return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
 		default:
-			buttons := []models.InteractiveButton{
-				{ID: "accepted", Title: "✅ Sí, acepto"},
-				{ID: "declined", Title: "❌ No acepto"},
-			}
-			err := SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
-				"Aviso de Privacidad",
-				"¡Hola! Antes de comenzar, ¿estás de acuerdo con nuestro tratamiento de datos personales para procesar tus pedidos?",
-				"Por favor selecciona una opción", buttons)
-			if err != nil {
-				h.log.Error("failed to send consent buttons", "err", err)
-				aiReply = "¡Hola! Antes de comenzar, ¿estás de acuerdo con nuestro tratamiento de datos personales? (Responde Sí/No)"
-				return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
-			}
-			return h.sessions.Save(ctx, session)
+			// Si el cliente ya aceptó en el pasado (metadata de DB), saltamos esto
+			// Pero aquí aún no hemos cargado al cliente. 
+			// Lo cargaremos antes para evitar preguntar de nuevo.
 		}
 	}
 
@@ -197,10 +190,23 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 	}
 
 	if customer == nil {
-		regState := session.Metadata["registration_state"]
+		regState, _ := session.Metadata["registration_state"].(string)
 		switch regState {
 		case "", "AWAITING_NAME":
 			if regState == "" {
+				// Solo preguntamos consentimiento si el cliente NO existe en BD
+				accepted, _ := session.Metadata["data_treatment_accepted"].(string)
+				if accepted != "si" {
+					buttons := []models.InteractiveButton{
+						{ID: "accepted", Title: "✅ Sí, acepto"},
+						{ID: "declined", Title: "❌ No acepto"},
+					}
+					_ = SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
+						"Aviso de Privacidad",
+						"¡Hola! Antes de comenzar, ¿estás de acuerdo con nuestro tratamiento de datos personales para procesar tus pedidos?",
+						"Por favor selecciona una opción", buttons)
+					return h.sessions.Save(ctx, session)
+				}
 				session.Metadata["registration_state"] = "AWAITING_NAME"
 				aiReply = "¡Veo que eres nuevo! Para brindarte una mejor atención, ¿podrías decirme tu nombre completo?"
 				return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
@@ -211,13 +217,23 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
 
 		case "AWAITING_EMAIL":
-			email := strings.TrimSpace(msg.Text)
+			session.Metadata["customer_email"] = strings.TrimSpace(msg.Text)
+			session.Metadata["registration_state"] = "AWAITING_ADDRESS"
+			aiReply = "¡Perfecto! Finalmente, ¿cuál es tu dirección principal para domicilios? (Ej: Calle 123 #45-67)"
+			return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
+
+		case "AWAITING_ADDRESS":
+			address := strings.TrimSpace(msg.Text)
 			newCustomer := &models.Customer{
 				TenantID:      tenant.ID,
 				WhatsAppPhone: msg.From,
-				Name:          session.Metadata["customer_name"],
-				Email:         email,
-				Metadata:      map[string]interface{}{"data_treatment_accepted": "si", "accepted_at": time.Now().Format(time.RFC3339)},
+				Name:          session.Metadata["customer_name"].(string),
+				Email:         session.Metadata["customer_email"].(string),
+				Metadata: map[string]interface{}{
+					"data_treatment_accepted": "si",
+					"accepted_at":             time.Now().Format(time.RFC3339),
+					"address":                 address,
+				},
 			}
 			if err := h.repo.CreateCustomer(ctx, newCustomer); err != nil {
 				h.log.Error("failed to create customer", "err", err)
@@ -225,14 +241,22 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			}
 			session.Metadata["registration_state"] = "COMPLETED"
 			session.Metadata["customer_id"] = newCustomer.ID
+			session.Metadata["customer_address"] = address
+			session.Metadata["data_treatment_accepted"] = "si"
 			
-			// Enviar bienvenida y menú interactivo inmediatamente
 			welcomeMsg := "¡Registro completado con éxito! Bienvenido a " + tenant.Name + " 🍕"
 			return h.sendMainMenu(ctx, tenant, session, msg, welcomeMsg)
 		}
 	} else {
 		session.Metadata["customer_id"] = customer.ID
 		session.Metadata["customer_name"] = customer.Name
+		// Sincronizar desde Metadata de DB
+		if val, ok := customer.Metadata["data_treatment_accepted"].(string); ok {
+			session.Metadata["data_treatment_accepted"] = val
+		}
+		if val, ok := customer.Metadata["address"].(string); ok {
+			session.Metadata["customer_address"] = val
+		}
 	}
 
 	switch activeAgent {
@@ -244,7 +268,9 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		orders := mapOrderRecords(records)
 		historyJSON, _ := json.Marshal(session.History)
 
-		resp := agents.HandleOrderVal(msg.Text, session.Metadata["orderval_state"], session.Metadata["orderval_context"], orders, string(historyJSON))
+		ordervalState, _ := session.Metadata["orderval_state"].(string)
+		ordervalContext, _ := session.Metadata["orderval_context"].(string)
+		resp := agents.HandleOrderVal(msg.Text, ordervalState, ordervalContext, orders, string(historyJSON))
 		aiReply = resp.Message
 		session.Metadata["orderval_state"] = resp.NextState
 		
@@ -258,11 +284,13 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		aiReply = agents.HandleSAC(msg.Text)
 	case "delivery":
 		var delSession agents.DeliverySession
-		if dsStr := session.Metadata["delivery_context"]; dsStr != "" {
-			_ = json.Unmarshal([]byte(dsStr), &delSession)
+		if dsVal := session.Metadata["delivery_context"]; dsVal != nil {
+			if dsStr, ok := dsVal.(string); ok && dsStr != "" {
+				_ = json.Unmarshal([]byte(dsStr), &delSession)
+			}
 		}
 		delSession.PhoneNumber = msg.From
-		delSession.CustomerID = session.Metadata["customer_id"]
+		delSession.CustomerID, _ = session.Metadata["customer_id"].(string)
 
 		products, _ := h.repo.GetProducts(ctx, tenant.ID)
 		resp := agents.HandleDelivery(ctx, &delSession, msg.Text, textNorm, session.History, products)
@@ -285,9 +313,10 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		switch resp.NextState {
 		case agents.StateDeliveryPlaced:
 			// PERSISTIR EN BD
+			customerID, _ := session.Metadata["customer_id"].(string)
 			order := &models.Order{
 				TenantID:        tenant.ID,
-				CustomerID:      session.Metadata["customer_id"],
+				CustomerID:      customerID,
 				OrderType:       "delivery",
 				Status:          "pending",
 				DeliveryAddress: resp.NewSession.Address,
@@ -319,7 +348,7 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			dsBytes, _ := json.Marshal(delSession)
 			session.Metadata["delivery_context"] = string(dsBytes)
 			aiReply = "¡Excelente elección! Vamos a tomar tu pedido a domicilio. ¿A qué dirección lo enviamos?"
-			return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
+			return h.finalizeMessage( ctx, tenant, session, msg, aiReply)
 		case "menu_1":
 			route.Intent = agents.RouteIntentCarta
 		case "menu_2":
@@ -384,19 +413,34 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 				aiReply = route.Message + "\n\nActualmente no tenemos productos disponibles en la carta."
 			} else {
 				var sb strings.Builder
-				sb.WriteString(route.Message + "\n\n📋 *NUESTRA CARTA*\n\n")
-				for i, p := range products {
-					desc := ""
-					if p.Description != nil && *p.Description != "" {
-						desc = fmt.Sprintf(" - %s", *p.Description)
+				sb.WriteString("✨ *NUESTRA CARTA SELECCIONADA* ✨\n\n")
+				
+				// Agrupar por categorías (si existieran, si no, solo listamos con estilo)
+				sb.WriteString("🍕 *PIZZAS ARTESANALES*\n")
+				for _, p := range products {
+					if strings.Contains(strings.ToLower(p.Name), "pizza") {
+						desc := ""
+						if p.Description != nil && *p.Description != "" {
+							desc = fmt.Sprintf(" _(%s)_", *p.Description)
+						}
+						sb.WriteString(fmt.Sprintf("• *%s*: %s%s\n", p.Name, formatPrice(p.Price), desc))
 					}
-					sb.WriteString(fmt.Sprintf("%d. %s: $%.0f%s\n", i+1, p.Name, p.Price, desc))
 				}
+				
+				sb.WriteString("\n🥤 *BEBIDAS Y OTROS*\n")
+				for _, p := range products {
+					if !strings.Contains(strings.ToLower(p.Name), "pizza") {
+						sb.WriteString(fmt.Sprintf("• *%s*: %s\n", p.Name, formatPrice(p.Price)))
+					}
+				}
+
+				sb.WriteString("\n¿Qué se te antoja hoy? Escribe el nombre del producto para comenzar tu pedido.")
+				
 				buttons := []models.InteractiveButton{
 					{ID: "MENU_PRINCIPAL", Title: "🏠 Menú Principal"},
 				}
 				err := SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
-					"Nuestra Carta", sb.String(), "", buttons)
+					"Carta Pizzería", sb.String(), "", buttons)
 				if err != nil {
 					h.log.Error("failed to send carta buttons", "err", err)
 					return h.finalizeMessage(ctx, tenant, session, msg, sb.String())
@@ -414,7 +458,7 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 				var sb strings.Builder
 				sb.WriteString(route.Message + "\n\n📍 *PUNTOS DE VENTA Y ZONAS*\n\n")
 				for _, z := range zones {
-					sb.WriteString(fmt.Sprintf("- %s (Min. orden: $%.0f, Domicilio: $%.0f)\n", z.Name, z.MinOrder, z.DeliveryFee))
+					sb.WriteString(fmt.Sprintf("- %s (Min. orden: %s, Domicilio: %s)\n", z.Name, formatPrice(z.MinOrder), formatPrice(z.DeliveryFee)))
 				}
 				
 				buttons := []models.InteractiveButton{
@@ -529,4 +573,8 @@ func mapOrderRecords(records []models.OrderRecord) []agents.OrderDetail {
 		})
 	}
 	return res
+}
+
+func formatPrice(price float64) string {
+	return fmt.Sprintf("$%.0f", price)
 }

@@ -18,7 +18,7 @@ type ConversationSession struct {
 	Context      map[string]string `json:"context"`
 	History      []models.AIMessage `json:"history"`
 	UpdatedAt    time.Time         `json:"updated_at"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
 }
 
 type SessionStore struct {
@@ -42,6 +42,7 @@ func (s *SessionStore) Load(ctx context.Context, tenantID string, userID string)
 				Context:      map[string]string{},
 				History:      []models.AIMessage{},
 				UpdatedAt:    time.Now().UTC(),
+				Metadata:     map[string]interface{}{},
 			}, nil
 		}
 		return nil, err
@@ -56,6 +57,9 @@ func (s *SessionStore) Load(ctx context.Context, tenantID string, userID string)
 	}
 	if session.History == nil {
 		session.History = []models.AIMessage{}
+	}
+	if session.Metadata == nil {
+		session.Metadata = map[string]interface{}{}
 	}
 	return &session, nil
 }

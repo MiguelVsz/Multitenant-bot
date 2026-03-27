@@ -1,7 +1,6 @@
 package agents
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,246 +10,7 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"multi-tenant-bot/internal/models"
-
-	"github.com/joho/godotenv"
 )
-
-const (
-	consoleAgentNone       = ""
-	consoleAgentCarta      = RouteIntentCarta
-	consoleAgentDelivery   = RouteIntentDelivery
-	consoleAgentPickup     = RouteIntentPickup
-	consoleAgentOrders     = RouteIntentOrders
-	consoleAgentUpdateData = RouteIntentUpdateData
-	consoleAgentSAC        = RouteIntentSAC
-)
-
-type consoleSession struct {
-	ActiveAgent    string
-	CurrentState   string
-	CurrentContext string
-	Delivery       *DeliverySession
-}
-
-func RunConsoleChat() error {
-	_ = godotenv.Load()
-
-	scanner := bufio.NewScanner(os.Stdin)
-	session := &consoleSession{}
-
-	fmt.Println("Bot de pruebas iniciado.")
-	fmt.Println("Puedes escribir cosas como: menu, sedes, domicilio, recoger en tienda, ver mis pedidos, actualizar datos.")
-	fmt.Println("Escribe 'salir' para terminar y 'menu principal' para reiniciar el flujo.")
-
-	for {
-		fmt.Print("\nTu: ")
-		if !scanner.Scan() {
-			break
-		}
-
-		input := strings.TrimSpace(scanner.Text())
-		if input == "" {
-			continue
-		}
-
-		switch strings.ToLower(input) {
-		case "salir", "exit", "quit":
-			fmt.Println("Sesion finalizada.")
-			return nil
-		case "menu principal", "menu", "inicio", "reiniciar":
-			resetConsoleSession(session)
-			fmt.Println("Bot:")
-			fmt.Println("  Regresamos al menu principal.")
-			fmt.Println("  Puedes elegir domicilio, recoger en tienda, ver pedidos, actualizar datos, ver sedes o ver productos.")
-			continue
-		}
-
-		reply := handleConsoleInput(session, input)
-		fmt.Println("Bot:")
-		for _, line := range strings.Split(reply, "\n") {
-			fmt.Printf("  %s\n", line)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error leyendo la consola: %w", err)
-	}
-
-	return nil
-}
-
-func handleConsoleInput(session *consoleSession, input string) string {
-	if session.ActiveAgent != consoleAgentNone {
-		return continueActiveFlow(session, input)
-	}
-
-	route := HandleRouter(input)
-	switch route.Intent {
-	case RouteIntentCarta:
-		session.ActiveAgent = consoleAgentCarta
-		return joinTransition(route.Message, renderStaticMenu(), "Si ya sabes lo que quieres, dime el producto y si lo prefieres a domicilio o para recoger en tienda.")
-	case RouteIntentLocations:
-		return joinTransition(route.Message, renderStaticLocations())
-	case RouteIntentDelivery:
-		session.ActiveAgent = consoleAgentDelivery
-		session.Delivery = &DeliverySession{}
-		return joinTransition(route.Message, applyDelivery(session, input))
-	case RouteIntentPickup:
-		session.ActiveAgent = consoleAgentPickup
-		session.CurrentState = "IDLE"
-		session.CurrentContext = "{}"
-		return joinTransition(route.Message, applyPickup(session, input))
-	case RouteIntentOrders:
-		session.ActiveAgent = consoleAgentOrders
-		session.CurrentState = "ORDERVAL_START"
-		session.CurrentContext = "{}"
-		return joinTransition(route.Message, applyOrderVal(session, input))
-	case RouteIntentUpdateData:
-		session.ActiveAgent = consoleAgentUpdateData
-		session.CurrentState = "UPDATE_START"
-		session.CurrentContext = "{}"
-		return joinTransition(route.Message, applyUpdateData(session, input))
-	case RouteIntentSAC:
-		session.ActiveAgent = consoleAgentSAC
-		return joinTransition(route.Message, HandleSAC(input))
-	default:
-		return route.Message
-	}
-}
-
-func continueActiveFlow(session *consoleSession, input string) string {
-	switch session.ActiveAgent {
-	case consoleAgentCarta:
-		return applyCarta(session, input)
-	case consoleAgentDelivery:
-		return applyDelivery(session, input)
-	case consoleAgentPickup:
-		return applyPickup(session, input)
-	case consoleAgentOrders:
-		return applyOrderVal(session, input)
-	case consoleAgentUpdateData:
-		return applyUpdateData(session, input)
-	case consoleAgentSAC:
-		reply := HandleSAC(input)
-		if strings.Contains(strings.ToLower(input), "gracias") || strings.Contains(strings.ToLower(input), "listo") {
-			resetConsoleSession(session)
-		}
-		return reply
-	default:
-		resetConsoleSession(session)
-		return "No tenia un flujo activo valido. Regresamos al menu principal."
-	}
-}
-
-func applyCarta(session *consoleSession, input string) string {
-	route := HandleRouter(input)
-
-	switch route.Intent {
-	case RouteIntentCarta, RouteIntentGreeting, RouteIntentUnknown:
-		return fmt.Sprintf(
-			"Veo que te interesa esto de la carta: %s\n\nSi quieres, te ayudo a continuar. Dime si lo prefieres a domicilio o para recoger en tienda. Tambien puedo mostrarte las sedes o el menu principal.",
-			input,
-		)
-	case RouteIntentDelivery:
-		session.ActiveAgent = consoleAgentDelivery
-		session.Delivery = &DeliverySession{}
-		session.CurrentState = ""
-		session.CurrentContext = ""
-		return joinTransition("Perfecto, continuemos con tu pedido a domicilio.", applyDelivery(session, ""))
-	case RouteIntentPickup:
-		session.ActiveAgent = consoleAgentPickup
-		session.Delivery = nil
-		session.CurrentState = "IDLE"
-		session.CurrentContext = "{}"
-		return joinTransition("Perfecto, continuemos con recogida en tienda.", applyPickup(session, ""))
-	case RouteIntentOrders:
-		session.ActiveAgent = consoleAgentOrders
-		session.Delivery = nil
-		session.CurrentState = "ORDERVAL_START"
-		session.CurrentContext = "{}"
-		return joinTransition("Claro, revisemos tus pedidos.", applyOrderVal(session, input))
-	case RouteIntentUpdateData:
-		session.ActiveAgent = consoleAgentUpdateData
-		session.Delivery = nil
-		session.CurrentState = "UPDATE_START"
-		session.CurrentContext = "{}"
-		return joinTransition("Con gusto te ayudo a actualizar tus datos.", applyUpdateData(session, input))
-	case RouteIntentLocations:
-		return joinTransition("Claro, te comparto las sedes disponibles.", renderStaticLocations(), "Si quieres pedir algo, despues me dices si lo prefieres a domicilio o para recoger.")
-	case RouteIntentMainMenu:
-		resetConsoleSession(session)
-		return "Regresamos al menu principal.\n\nPuedes elegir domicilio, recoger en tienda, ver pedidos, actualizar datos, ver sedes o ver productos."
-	case RouteIntentSAC:
-		session.ActiveAgent = consoleAgentSAC
-		session.Delivery = nil
-		session.CurrentState = ""
-		session.CurrentContext = ""
-		return joinTransition("Te ayudo con soporte.", HandleSAC(input))
-	default:
-		return "Te sigo ayudando con la carta. Dime si lo quieres a domicilio, para recoger en tienda, o si prefieres volver al menu principal."
-	}
-}
-
-func applyDelivery(session *consoleSession, input string) string {
-	if session.Delivery == nil {
-		session.Delivery = &DeliverySession{}
-	}
-
-	resp := HandleDelivery(context.Background(), session.Delivery, input, input, []models.AIMessage{}, []models.Product{})
-	session.Delivery = resp.NewSession
-
-	if resp.NextState == StateDeliveryPlaced || resp.NextState == StateDeliveryIdle {
-		message := resp.Message + "\n\nSi deseas, tambien puedes escribir menu principal para volver al inicio."
-		resetConsoleSession(session)
-		return message
-	}
-
-	return resp.Message
-}
-
-func applyPickup(session *consoleSession, input string) string {
-	resp := HandlePickup(input, session.CurrentState, session.CurrentContext)
-	session.CurrentState = resp.NextState
-	session.CurrentContext = mustMarshalContext(resp.NewContext)
-
-	if resp.NextState == "FINISHED" || resp.NextState == "IDLE" {
-		message := resp.Message + "\n\nTambien puedes escribir menu principal o contarme que necesitas."
-		resetConsoleSession(session)
-		return message
-	}
-
-	return resp.Message
-}
-
-func applyOrderVal(session *consoleSession, input string) string {
-	resp := HandleOrderVal(input, session.CurrentState, session.CurrentContext, []OrderDetail{}, "")
-	session.CurrentState = resp.NextState
-	session.CurrentContext = mustMarshalContext(resp.NewContext)
-
-	if resp.NextState == "IDLE" {
-		message := resp.Message
-		resetConsoleSession(session)
-		return message
-	}
-
-	return resp.Message
-}
-
-func applyUpdateData(session *consoleSession, input string) string {
-	resp := HandleUpdateData(input, session.CurrentState, session.CurrentContext)
-	session.CurrentState = resp.NextState
-	session.CurrentContext = mustMarshalContext(resp.NewContext)
-
-	if resp.NextState == "IDLE" {
-		message := resp.Message + "\n\nSi necesitas algo mas, tambien puedes escribirlo libremente."
-		resetConsoleSession(session)
-		return message
-	}
-
-	return resp.Message
-}
 
 func HandleSAC(input string) string {
 	apiKey := resolveSACKey()
@@ -314,7 +74,8 @@ func cleanAIReply(reply string) string {
 	internalTags := []string{
 		"VALIDACION", "DIAGNOSTICO", "PLAN DE ACCION", "PLAN DE ACCIÓN",
 		"VALIDACIÓN", "DIAGNÓSTICO", "SELECCIONO", "SELECCIONO MENU",
-		"ANADE", "AÑADE", "REGISTRO", "ERROR",
+		"ANADE", "AÑADE", "REGISTRO", "ERROR", "RADICADO", "TIEMPO DE RESPUESTA",
+		"TIEMPO DE RESPUESTA ESTIMADO", "SOLUCION", "SOLUCIÓN",
 	}
 	
 	lines := strings.Split(reply, "\n")
@@ -329,32 +90,26 @@ func cleanAIReply(reply string) string {
 		upperLine := strings.ToUpper(trimmedLine)
 		isInternal := false
 
-		// 1. Eliminar líneas que son puramente etiquetas internas
+		// 1. Eliminar líneas que son puramente etiquetas internas o contienen palabras prohibidas
 		for _, tag := range internalTags {
-			// Caso: "*TAG*" o "TAG:"
+			// Caso: "*TAG*" o "TAG:" o simplemente la palabra sola al inicio
 			if strings.Contains(upperLine, "*"+tag+"*") || 
 			   strings.HasPrefix(upperLine, tag+":") || 
-			   strings.HasPrefix(upperLine, "- "+tag+":") {
+			   strings.HasPrefix(upperLine, "- "+tag+":") ||
+			   (len(trimmedLine) < len(tag)+5 && strings.Contains(upperLine, tag)) {
 				
-				// Si la línea es corta y parece solo un encabezado
-				if len(trimmedLine) < len(tag)+15 {
-					isInternal = true
-					break
-				}
-				// Si es larga, intentamos limpiar el prefijo
-				line = strings.Replace(line, "*"+tag+"*:", "", -1)
-				line = strings.Replace(line, "*"+tag+"*", "", -1)
-				line = strings.Replace(line, tag+":", "", -1)
-				line = strings.TrimSpace(line)
+				isInternal = true
+				break
 			}
 		}
 
 		// 2. Filtro heurístico para líneas que no parecen ser para el cliente
-		// Ej: "Selecciono menu 4.", "Falta información."
 		if !isInternal {
 			if strings.HasPrefix(upperLine, "SELECCIONO") || 
 			   strings.HasPrefix(upperLine, "FALTA INFORMACIÓN") || 
-			   strings.HasPrefix(upperLine, "FALTA INFORMACION") {
+			   strings.HasPrefix(upperLine, "FALTA INFORMACION") ||
+			   strings.Contains(upperLine, "RADICADO:") ||
+			   strings.Contains(upperLine, "TIEMPO DE RESPUESTA:") {
 				isInternal = true
 			}
 		}
@@ -385,62 +140,9 @@ func sacBusinessType() string {
 }
 
 func sacSystemPrompt(tipoDeNegocio string) string {
-	return fmt.Sprintf(`Eres un Especialista de Servicio al Cliente (SAC) de nivel 2 para una empresa de %s.
-Tu objetivo es gestionar Peticiones, Quejas y Reclamos (PQR) de forma tecnica, resolutiva y empatica.
-Tu prioridad es la solucion del problema, no la charla trivial.
-
-Directrices de comportamiento:
-- Claridad tecnica: resuelve problemas especificos de %s. Ve al grano.
-- Estructura obligatoria: divide tu respuesta en VALIDACION, DIAGNOSTICO y PLAN DE ACCION.
-- Tono: profesional y eficiente.
-- Proactividad: proporciona pasos tecnicos o administrativos de inmediato.
-
-Protocolo:
-1. Recepcion y categorizacion (Peticion, Queja o Reclamo).
-2. Validacion del contexto.
-3. Resolucion guiada con instrucciones numeradas.
-4. Cierre con numero de radicado simulado y tiempo de respuesta.
-
-Restricciones:
-- no sobre pasar los 155 a 355 caracteres en los mensajes.
-- Prohibido contenido que no sea de soporte para %s.
-- No inventes politicas imposibles de cumplir.
-- Si falta informacion, pide solo los datos minimos necesarios para continuar.`, tipoDeNegocio, tipoDeNegocio, tipoDeNegocio)
-}
-
-func renderStaticMenu() string {
-	return "Menu disponible hoy:\n1. Hamburguesa Clasica - $18.000\n2. Combo BBQ - $27.000\n3. Papas Medianas - $7.000\n4. Gaseosa 400ml - $5.000\n\nSi deseas, tambien puedes escribirme lo que necesites y con gusto te ayudare."
-}
-
-func renderStaticLocations() string {
-	return "Sedes disponibles:\n1. Centro Comercial Andino\n2. Portal Norte\n3. Salitre Plaza\n\nSi ninguna opcion te sirve, tambien puedes escribirme lo que necesites y con gusto te ayudare."
-}
-
-func joinTransition(parts ...string) string {
-	filtered := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			filtered = append(filtered, part)
-		}
-	}
-	return strings.Join(filtered, "\n\n")
-}
-
-func mustMarshalContext(ctx map[string]string) string {
-	if ctx == nil {
-		return "{}"
-	}
-	raw, err := json.Marshal(ctx)
-	if err != nil {
-		return "{}"
-	}
-	return string(raw)
-}
-
-func resetConsoleSession(session *consoleSession) {
-	session.ActiveAgent = consoleAgentNone
-	session.CurrentState = ""
-	session.CurrentContext = ""
-	session.Delivery = nil
+	return fmt.Sprintf(`Eres un Especialista de SAC para una empresa de %s.
+Responde de forma tecnica, resolutiva y directa. 
+NO uses encabezados como VALIDACION, DIAGNOSTICO o PLAN DE ACCION. 
+Solo el mensaje final para el cliente.
+Máximo 300 caracteres.`, tipoDeNegocio)
 }

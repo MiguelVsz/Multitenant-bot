@@ -21,7 +21,8 @@ const (
 	StateDeliveryUpsell           = "UPSELLING"
 	StateDeliveryConfirmingOrder = "CONFIRMING_ORDER"
 	StateDeliveryPayment         = "PAYMENT"
-	StateDeliveryPlaced          = "ORDER_PLACED"
+	StateDeliveryConfirmingRegisteredAddress = "CONFIRMING_REGISTERED_ADDRESS"
+	StateDeliveryPlaced                      = "ORDER_PLACED"
 )
 
 type DeliverySession struct {
@@ -56,9 +57,45 @@ func HandleDelivery(
 
 	switch session.State {
 	case "", StateDeliveryIdle:
+		if session.Address != "" {
+			session.State = StateDeliveryConfirmingRegisteredAddress
+			return &DeliveryResponse{
+				Message:    fmt.Sprintf("Veo que tienes una dirección registrada: %s. ¿Deseas usarla o prefieres una nueva?", session.Address),
+				NextState:  StateDeliveryConfirmingRegisteredAddress,
+				NewSession: session,
+				Buttons: []models.InteractiveButton{
+					{ID: "use_reg_addr", Title: "📍 Usar Registrada"},
+					{ID: "use_new_addr", Title: "🏠 Usar Nueva"},
+					{ID: "confirm_cancel", Title: "❌ Cancelar"},
+				},
+			}
+		}
 		session.State = StateDeliveryAwaitingAddress
 		return &DeliveryResponse{
 			Message:    "¡Claro! ¿A qué dirección enviamos tu pedido?",
+			NextState:  StateDeliveryAwaitingAddress,
+			NewSession: session,
+			Buttons: []models.InteractiveButton{
+				{ID: "confirm_cancel", Title: "❌ Cancelar"},
+			},
+		}
+
+	case StateDeliveryConfirmingRegisteredAddress:
+		if textNorm == "use_reg_addr" {
+			session.State = StateDeliveryAwaitingProduct
+			return &DeliveryResponse{
+				Message:    fmt.Sprintf("Perfecto, enviaremos a: %s. ¿Qué te gustaría pedir?", session.Address),
+				NextState:  StateDeliveryAwaitingProduct,
+				NewSession: session,
+				Buttons: []models.InteractiveButton{
+					{ID: "menu_1", Title: "🍕 Ver Carta"},
+					{ID: "confirm_cancel", Title: "❌ Cancelar"},
+				},
+			}
+		}
+		session.State = StateDeliveryAwaitingAddress
+		return &DeliveryResponse{
+			Message:    "Entendido. ¿A qué dirección enviamos tu pedido entonces?",
 			NextState:  StateDeliveryAwaitingAddress,
 			NewSession: session,
 			Buttons: []models.InteractiveButton{
@@ -125,11 +162,35 @@ func HandleDelivery(
 		}
 
 	case StateDeliveryUpsell:
-		if isPositive(userInput) {
-			// Encontrar qué sugirió la IA (esto es un poco complejo sin estado extra, pero por ahora simulamos que acepta el mejor complemento)
-			// Para algo real, la IA de upsell debería devolver el productoID sugerido.
-			// Por ahora, asumimos que el usuario acepta un 'complemento' genérico si dice sí.
-			// TODO: Mejorar lógica de upsell para identificar el producto aceptado.
+		if textNorm == "upsell_yes" || isPositive(userInput) {
+			// Intentar extraer el producto sugerido del historial o un campo en sesión
+			// Por ahora, como es stateless la IA de upsell, usaremos una IA rápida para extraer qué se ofreció
+			sugerencia := ""
+			for i := len(history) - 1; i >= 0; i-- {
+				if history[i].Role == "assistant" {
+					sugerencia = history[i].Content
+					break
+				}
+			}
+			prodName, qty, found := pickProductWithAI(sugerencia, products, nil, apiKey)
+			if found {
+				var selected models.Product
+				for _, p := range products {
+					if strings.EqualFold(p.Name, prodName) {
+						selected = p
+						break
+					}
+				}
+				item := models.OrderItem{
+					ProductID: &selected.ID,
+					Name:      selected.Name,
+					UnitPrice: selected.Price,
+					Quantity:  qty,
+					Subtotal:  selected.Price * float64(qty),
+				}
+				session.Cart = append(session.Cart, item)
+				session.Total += item.Subtotal
+			}
 		}
 		
 		session.State = StateDeliveryConfirmingOrder
