@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"multi-tenant-bot/internal/models"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -34,6 +35,7 @@ func HandlePickup(
 	userInput string,
 	currentState string,
 	currentContext string,
+	history []models.AIMessage,
 	zones []models.CoverageZone,
 	products []models.Product,
 ) PickupResponse {
@@ -44,16 +46,18 @@ func HandlePickup(
 	}
 
 	var res PickupResponse
-	apiKey := resolveAPIKey()
+	apiKey := os.Getenv("AGENT_PICKUP_KEY")
+	if apiKey == "" {
+		apiKey = os.Getenv("GROQ_API_KEY")
+	}
+	
 	menuBtn := models.InteractiveButton{ID: "menu_principal", Title: "🏠 Menú Principal"}
 
 	switch currentState {
 	case "IDLE", "":
 		res.Message = "🥡 *Recoger en Tienda*\n━━━━━━━━━━━━━━━━\n\n¡Perfecto! ¿En qué *sede o ciudad* te gustaría recoger tu pedido?"
 		res.NextState = "PICKUP_AWAITING_LOCATION"
-		res.Buttons = []models.InteractiveButton{
-			{ID: "confirm_cancel", Title: "❌ Cancelar pedido"},
-		}
+		res.Buttons = buildZoneButtons(zones)
 
 	case "PICKUP_AWAITING_LOCATION":
 		// Guard: botones
@@ -70,9 +74,7 @@ func HandlePickup(
 		if action == "reply" {
 			res.Message = aiMsg
 			res.NextState = "PICKUP_AWAITING_LOCATION"
-			res.Buttons = []models.InteractiveButton{
-				{ID: "confirm_cancel", Title: "❌ Cancelar"},
-			}
+			res.Buttons = buildZoneButtons(zones)
 			res.NewContext = context
 			return res
 		}
@@ -142,8 +144,7 @@ func HandlePickup(
 			res.Message = recommendation
 			res.NextState = StatePickupAwaitingProduct
 			res.Buttons = []models.InteractiveButton{
-				{ID: "menu_1", Title: "🍕 Ver Carta completa"},
-				menuBtn,
+				{ID: "confirm_cancel", Title: "❌ Cancelar pedido"},
 			}
 			res.NewContext = context
 			return res
@@ -151,7 +152,11 @@ func HandlePickup(
 
 		// Caso 2: El usuario intenta pedir un producto — validar contra catálogo con IA (Agente Maestro)
 		if len(products) > 0 && apiKey != "" {
-			recentHistory := []models.AIMessage{}
+			recentHistory := history
+			if len(recentHistory) > 8 {
+				recentHistory = recentHistory[len(recentHistory)-8:]
+			}
+			
 			storeAddr := context["store"] + ", " + context["city"]
 			cartStr := context["products"]
 			action, aiMsg, productName, quantity := processOrderAI(userInput, storeAddr, cartStr, products, recentHistory, apiKey)
@@ -160,6 +165,29 @@ func HandlePickup(
 				res.Message = aiMsg
 				res.NextState = StatePickupAwaitingProduct
 				res.Buttons = []models.InteractiveButton{
+					{ID: "confirm_cancel", Title: "❌ Cancelar pedido"},
+				}
+				res.NewContext = context
+				return res
+			}
+
+			if action == "confirm_order" {
+				totalStr := ""
+				if t := context["products"]; t != "" {
+					totalStr = "\n🛒 Pedido: " + t
+				} else {
+					res.Message = "Aún no has agregado productos a tu pedido. ¿Qué te gustaría pedir?"
+					res.NextState = StatePickupAwaitingProduct
+					res.NewContext = context
+					return res
+				}
+				res.Message = fmt.Sprintf(
+					"📝 *Resumen – Recogida en Tienda*\n━━━━━━━━━━━━━━━━\n📍 Punto: *%s*\n🏙️ Ciudad: *%s*%s\n\n💰 El precio final se confirma en tienda.\n\n¿Confirmas tu pedido?",
+					context["store"], context["city"], totalStr,
+				)
+				res.NextState = StatePickupConfirming
+				res.Buttons = []models.InteractiveButton{
+					{ID: "pickup_final_ok", Title: "✅ Confirmar pedido"},
 					{ID: "confirm_cancel", Title: "❌ Cancelar pedido"},
 				}
 				res.NewContext = context
@@ -185,18 +213,13 @@ func HandlePickup(
 					
 					upsellMsg := aiMsg
 					if upsellMsg == "" {
-						upsellMsg = fmt.Sprintf("🍕 ¡Excelente elección! Agregué *%dx %s* a tu pedido. ", quantity, matched.Name)
-					} else {
-						upsellMsg += " "
+						upsellMsg = fmt.Sprintf("🍕 ¡Excelente elección! Agregué *%dx %s* a tu pedido. ¿Deseas pedir algo más?", quantity, matched.Name)
 					}
-					upsellMsg += "¿Deseas agregar algo más o confirmamos tu pedido?"
 					
 					res.Message = upsellMsg
-					res.NextState = StatePickupUpsell
+					res.NextState = StatePickupAwaitingProduct
 					res.Buttons = []models.InteractiveButton{
-						{ID: "pickup_upsell_yes", Title: "✅ Sí, agregar más"},
-						{ID: "pickup_upsell_no", Title: "👎 No, continuar"},
-						menuBtn,
+						{ID: "confirm_cancel", Title: "❌ Cancelar pedido"},
 					}
 					res.NewContext = context
 					return res
@@ -227,8 +250,7 @@ func HandlePickup(
 		res.Message = sb.String()
 		res.NextState = StatePickupAwaitingProduct
 		res.Buttons = []models.InteractiveButton{
-			{ID: "menu_1", Title: "🍕 Ver Carta completa"},
-			menuBtn,
+			{ID: "confirm_cancel", Title: "❌ Cancelar pedido"},
 		}
 
 	case StatePickupUpsell:
@@ -419,4 +441,21 @@ func normalizeText(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// buildZoneButtons genera botones de sede dinámicos (hasta 2) para WhatsApp + botón de cancelar
+func buildZoneButtons(zones []models.CoverageZone) []models.InteractiveButton {
+	var btns []models.InteractiveButton
+	for i, z := range zones {
+		if i >= 2 {
+			break
+		}
+		title := z.Name
+		if len(title) > 20 {
+			title = title[:20]
+		}
+		btns = append(btns, models.InteractiveButton{ID: z.Name, Title: title})
+	}
+	btns = append(btns, models.InteractiveButton{ID: "confirm_cancel", Title: "❌ Cancelar"})
+	return btns
 }

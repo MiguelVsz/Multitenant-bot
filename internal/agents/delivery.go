@@ -435,7 +435,7 @@ func buildQuickRecommendation(products []models.Product) string {
 // processOrderAI es el Agente Maestro Conversacional para Domicilios y Recogida.
 // Decide mediante un único LLM call si el usuario quiere:
 // 1. Chatear / Preguntar / Pedir Recomendación -> accion="reply"
-// 2. Comprar / Agregar producto (después de charlar o directamente) -> accion="add_product"
+// 3. Confirmar pedido (ya no quiere nada más) -> accion="confirm_order"
 func processOrderAI(input string, address string, cartStr string, products []models.Product, history []models.AIMessage, apiKey string) (action, message, productName string, quantity int) {
 	if apiKey == "" {
 		// Fallback sin IA: asumir que es una búsqueda tonta de producto
@@ -454,21 +454,22 @@ Carrito actual: %s
 Tu objetivo es llevar una conversación FLUIDA y NATURAL.
 Debes responder en formato JSON estrictamente:
 {
-  "action": "reply" | "add_product",
+  "action": "reply" | "add_product" | "confirm_order",
   "message": "Mensaje para el usuario",
   "product": "Nombre Exacto del Producto (solo si action=add_product)",
   "quantity": 1
 }
 
 REGLAS:
-1. Si el usuario saluda, pide recomendaciones ("qué me recomiendas?"), o hace preguntas (ej: "qué trae la margarita?"), usa action="reply" y responde fluidamente recomendando productos de la carta.
-2. Si el usuario confirma que quiere METER AL CARRITO un producto (ej: "sí, quiero esa", "dame una hawaiana", "la margarita 2"), usa action="add_product". En "product" pon el NOMBRE EXACTO de nuestro catálogo.
-   En "message" puedes poner una frase amigable corta como "¡Buena elección!".
-3. NUNCA inventes productos. Usa SOLO estos productos disponibles:
+1. Si el usuario saluda, pide recomendaciones o hace preguntas (ej: "qué trae la margarita?"), usa action="reply" y responde fluidamente.
+2. Si el usuario confirma que quiere METER AL CARRITO un producto, usa action="add_product". En "product" pon el NOMBRE EXACTO de nuestro catálogo.
+   IMPORTANTE: En "message", dile que lo agregaste y pregúntale naturalmente si desea algo más de tomar o si ya finaliza el pedido.
+3. Si el usuario dice que ya no quiere nada más ("eso es todo", "mándalo ya", "ya quiero confirmar"), usa action="confirm_order".
+4. NUNCA inventes productos. Usa SOLO estos productos disponibles:
 %s
-4. NO sugieras salir al menú si no te lo piden. Si dicen "si es rica?", solo diles "¡Es deliciosa! ¿Te la apunto?". NO pongas action="add_product" hasta que sea innegable que quieren pedirlo.
+5. NO sugieras salir al menú. Si dicen "si es rica?", solo usa reply. NO pongas action="add_product" hasta que sea innegable que quieren pedirlo.
 
-Responde SOLO con el JSON válido.`, address, cartStr, catalogCtx)
+Responde SOLO con el JSON válido sin markdown code blocks.`, address, cartStr, catalogCtx)
 
 	messages := []map[string]string{
 		{"role": "system", "content": prompt},
