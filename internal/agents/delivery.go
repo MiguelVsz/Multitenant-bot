@@ -80,6 +80,7 @@ func HandleDelivery(
 		if addr == "" {
 			addr = "no registrada"
 		}
+		session.State = StateDeliveryAwaitingProduct
 		return &DeliveryResponse{
 			Message:    fmt.Sprintf("Ya tenemos registrada tu dirección: *%s*\n\n¿Qué producto deseas agregar?", addr),
 			NextState:  StateDeliveryAwaitingProduct,
@@ -123,11 +124,10 @@ func HandleDelivery(
 		if textNorm == "use_reg_addr" {
 			session.State = StateDeliveryAwaitingProduct
 			return &DeliveryResponse{
-				Message:   fmt.Sprintf("Perfecto, enviaremos a: *%s*\n\n🍕 ¿Qué deseas pedir? Puedes escribir el nombre, pedir una recomendación o ver la carta:", session.Address),
+				Message:   fmt.Sprintf("Perfecto, enviaremos a: *%s*\n\n🍕 ¿Qué deseas pedir? Escríbelo, pídeme recomendaciones o dime qué se te antoja:", session.Address),
 				NextState: StateDeliveryAwaitingProduct,
 				NewSession: session,
 				Buttons: []models.InteractiveButton{
-					{ID: "menu_1", Title: "🍕 Ver Carta"},
 					{ID: "confirm_cancel", Title: "❌ Cancelar"},
 				},
 			}
@@ -157,11 +157,10 @@ func HandleDelivery(
 		session.Address = userInput
 		session.State = StateDeliveryAwaitingProduct
 		return &DeliveryResponse{
-			Message:   fmt.Sprintf("✅ Dirección guardada: *%s*\n\n🍕 ¿Qué deseas pedir? Puedes escribir el nombre, pedir recomendación o ver la carta:", session.Address),
+			Message:   fmt.Sprintf("✅ Dirección guardada: *%s*\n\n🍕 ¿Qué deseas pedir? Escríbelo, pídeme recomendaciones o dime qué se te antoja:", session.Address),
 			NextState: StateDeliveryAwaitingProduct,
 			NewSession: session,
 			Buttons: []models.InteractiveButton{
-				{ID: "menu_1", Title: "🍕 Ver Carta"},
 				{ID: "confirm_cancel", Title: "❌ Cancelar"},
 			},
 		}
@@ -178,7 +177,7 @@ func HandleDelivery(
 				}
 				sb.WriteString("\n")
 			}
-			sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━\n✍️ Escribe el nombre del producto que quieres pedir:")
+			sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━\n✍️ Escribe lo que quieras pedir:")
 			return &DeliveryResponse{
 				Message:   sb.String(),
 				NextState: StateDeliveryAwaitingProduct,
@@ -189,55 +188,46 @@ func HandleDelivery(
 			}
 		}
 
-		// Recomendación con IA que conoce el catálogo
-		if IsRecommendationQuery(userInput) {
-			catalogStr := buildDeliveryCatalogPrompt(products, []*models.CoverageZone{})
-			recommendation := AskAIRecommendation(userInput, catalogStr, "nuestra pizzería")
-			if recommendation == "" {
-				recommendation = buildQuickRecommendation(products)
-			}
-			return &DeliveryResponse{
-				Message:   recommendation,
-				NextState: StateDeliveryAwaitingProduct,
-				NewSession: session,
-				Buttons: []models.InteractiveButton{
-					{ID: "menu_1", Title: "🍕 Ver Carta completa"},
-					{ID: "confirm_cancel", Title: "❌ Cancelar"},
-				},
-			}
-		}
-
-		// Intentar identificar producto con IA
+		// Agente Maestro para conversación unificada en este estado
 		recentHistory := history
-		if len(recentHistory) > 6 {
-			recentHistory = recentHistory[len(recentHistory)-6:]
+		if len(recentHistory) > 8 {
+			recentHistory = recentHistory[len(recentHistory)-8:]
 		}
-		productName, quantity, found := pickProductWithAI(userInput, products, recentHistory, apiKey)
+		
+		cartStr := renderCart(session.Cart)
+		action, aiMsg, productName, quantity := processOrderAI(userInput, session.Address, cartStr, products, recentHistory, apiKey)
 
-		if !found {
-			// Pregunta general o producto no encontrado → IA conversacional con catálogo
-			catalogCtx := buildDeliveryCatalogPrompt(products, []*models.CoverageZone{})
-			aiMsg := askMenuConversationAI(userInput, catalogCtx, session)
-			if aiMsg == "" {
-				aiMsg = "No encontré ese producto. ¿Podrías decirme el nombre exacto? Puedes ver la carta con el botón de abajo."
-			}
+		if action == "reply" {
 			return &DeliveryResponse{
 				Message:   aiMsg,
 				NextState: StateDeliveryAwaitingProduct,
 				NewSession: session,
 				Buttons: []models.InteractiveButton{
-					{ID: "menu_1", Title: "🍕 Ver Carta"},
 					{ID: "confirm_cancel", Title: "❌ Cancelar"},
 				},
 			}
 		}
 
-		// Buscar el producto real
+		// Acción "add_product": Buscar el producto real validado
 		var selected models.Product
 		for _, p := range products {
 			if strings.EqualFold(p.Name, productName) {
 				selected = p
 				break
+			}
+		}
+
+		// Fallback por si la IA alucinó un nombre que no coincide exacto
+		if selected.ID == "" {
+			catalogCtx := buildDeliveryCatalogPrompt(products, []*models.CoverageZone{})
+			fallbackMsg := askMenuConversationAI(userInput, catalogCtx, session)
+			return &DeliveryResponse{
+				Message:   fallbackMsg,
+				NextState: StateDeliveryAwaitingProduct,
+				NewSession: session,
+				Buttons: []models.InteractiveButton{
+					{ID: "confirm_cancel", Title: "❌ Cancelar"},
+				},
 			}
 		}
 
@@ -250,15 +240,22 @@ func HandleDelivery(
 		}
 		session.Cart = append(session.Cart, item)
 		session.Total += item.Subtotal
+		
 		session.State = StateDeliveryUpsell
 		suggested := getUpsellSuggestion(selected, products, history, apiKey)
 		session.SuggestedItem = suggested
 
-		upsellMsg := fmt.Sprintf("¡Excelente! Agregué *%dx %s* ($%.0f) a tu pedido. ", quantity, selected.Name, item.Subtotal)
+		upsellMsg := aiMsg
+		if upsellMsg == "" {
+			upsellMsg = fmt.Sprintf("¡Excelente elección! Agregué *%dx %s* ($%.0f) a tu pedido. ", quantity, selected.Name, item.Subtotal)
+		} else {
+			upsellMsg += " "
+		}
+
 		if suggested != nil {
 			upsellMsg += fmt.Sprintf("¿Te gustaría acompañarlo con *%s* por solo *$%.0f* adicionales?", suggested.Name, suggested.Price)
 		} else {
-			upsellMsg += "¿Deseas agregar algo más?"
+			upsellMsg += "¿Deseas agregar algo más o confirmamos tu pedido?"
 		}
 
 		return &DeliveryResponse{
@@ -435,26 +432,49 @@ func buildQuickRecommendation(products []models.Product) string {
 
 
 
-func pickProductWithAI(input string, products []models.Product, history []models.AIMessage, apiKey string) (string, int, bool) {
+// processOrderAI es el Agente Maestro Conversacional para Domicilios y Recogida.
+// Decide mediante un único LLM call si el usuario quiere:
+// 1. Chatear / Preguntar / Pedir Recomendación -> accion="reply"
+// 2. Comprar / Agregar producto (después de charlar o directamente) -> accion="add_product"
+func processOrderAI(input string, address string, cartStr string, products []models.Product, history []models.AIMessage, apiKey string) (action, message, productName string, quantity int) {
 	if apiKey == "" {
-		return "", 0, false
+		// Fallback sin IA: asumir que es una búsqueda tonta de producto
+		return "reply", "No tengo IA configurada. Escribe el nombre exacto de la carta.", "", 0
 	}
 
-	productList := ""
-	for _, p := range products {
-		productList += fmt.Sprintf("- %s ($%.0f)\n", p.Name, p.Price)
+	catalogCtx := buildDeliveryCatalogPrompt(products, nil)
+	if cartStr == "" {
+		cartStr = "vacío"
 	}
 
-	prompt := fmt.Sprintf(`Identifica el producto y la cantidad que el usuario quiere pedir de la siguiente lista:
+	prompt := fmt.Sprintf(`Eres el Agente de Pedidos de una pizzería/restaurante. El usuario está armando su pedido.
+Dirección/Punto: %s
+Carrito actual: %s
+
+Tu objetivo es llevar una conversación FLUIDA y NATURAL.
+Debes responder en formato JSON estrictamente:
+{
+  "action": "reply" | "add_product",
+  "message": "Mensaje para el usuario",
+  "product": "Nombre Exacto del Producto (solo si action=add_product)",
+  "quantity": 1
+}
+
+REGLAS:
+1. Si el usuario saluda, pide recomendaciones ("qué me recomiendas?"), o hace preguntas (ej: "qué trae la margarita?"), usa action="reply" y responde fluidamente recomendando productos de la carta.
+2. Si el usuario confirma que quiere METER AL CARRITO un producto (ej: "sí, quiero esa", "dame una hawaiana", "la margarita 2"), usa action="add_product". En "product" pon el NOMBRE EXACTO de nuestro catálogo.
+   En "message" puedes poner una frase amigable corta como "¡Buena elección!".
+3. NUNCA inventes productos. Usa SOLO estos productos disponibles:
 %s
+4. NO sugieras salir al menú si no te lo piden. Si dicen "si es rica?", solo diles "¡Es deliciosa! ¿Te la apunto?". NO pongas action="add_product" hasta que sea innegable que quieren pedirlo.
 
-Responde únicamente en formato JSON: {"product": "Nombre Exacto", "quantity": 1, "found": true}
-Si no encuentras el producto, responde {"found": false}`, productList)
+Responde SOLO con el JSON válido.`, address, cartStr, catalogCtx)
 
 	messages := []map[string]string{
 		{"role": "system", "content": prompt},
 	}
-	// Añadir historial reciente
+	
+	// Limitar historial para no sobrecargar
 	for _, h := range history {
 		role := h.Role
 		if role == "assistant" { role = "assistant" }
@@ -466,6 +486,7 @@ Si no encuentras el producto, responde {"found": false}`, productList)
 		"model": "llama-3.3-70b-versatile",
 		"messages": messages,
 		"response_format": map[string]string{"type": "json_object"},
+		"temperature": 0.5,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -476,7 +497,9 @@ Si no encuentras el producto, responde {"found": false}`, productList)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != 200 { return "", 0, false }
+	if err != nil || resp.StatusCode != 200 { 
+		return "reply", "Oops, tuve un pequeño problema procesando tu mensaje. ¿Me lo repites?", "", 0 
+	}
 	defer resp.Body.Close()
 
 	var res struct {
@@ -489,13 +512,20 @@ Si no encuentras el producto, responde {"found": false}`, productList)
 	json.NewDecoder(resp.Body).Decode(&res)
 
 	var data struct {
+		Action   string `json:"action"`
+		Message  string `json:"message"`
 		Product  string `json:"product"`
 		Quantity int    `json:"quantity"`
-		Found    bool   `json:"found"`
 	}
-	json.Unmarshal([]byte(res.Choices[0].Message.Content), &data)
+	err = json.Unmarshal([]byte(res.Choices[0].Message.Content), &data)
+	if err != nil {
+		return "reply", "No te entendí bien, ¿qué te gustaría pedir?", "", 0
+	}
 
-	return data.Product, data.Quantity, data.Found
+	if data.Action == "" { data.Action = "reply" }
+	if data.Quantity <= 0 { data.Quantity = 1 }
+
+	return data.Action, data.Message, data.Product, data.Quantity
 }
 
 func getUpsellSuggestion(selected models.Product, products []models.Product, _ []models.AIMessage, apiKey string) *models.Product {
@@ -570,20 +600,19 @@ func resolveAPIKey() string {
 
 func isPositive(msg string) bool {
 	s := strings.ToLower(strings.TrimSpace(msg))
-	positiveExact := []string{"si", "sí", "ok", "vale", "claro", "acepto", "perfecto", "listo", "dale", "upsell_yes", "upsell yes"}
+	positiveExact := []string{"si", "sí", "ok", "vale", "claro", "acepto", "perfecto", "listo", "dale", "upsell_yes", "upsell yes", "pickup_upsell_yes"}
 	for _, w := range positiveExact {
 		if s == w {
 			return true
 		}
 	}
-	// Verificar como palabra completa al inicio o fin
 	return strings.HasPrefix(s, "si ") || strings.HasPrefix(s, "sí ") ||
 		strings.HasSuffix(s, " si") || strings.HasSuffix(s, " sí")
 }
 
 func isNegative(msg string) bool {
 	s := strings.ToLower(strings.TrimSpace(msg))
-	negativeExact := []string{"no", "nel", "nop", "nope", "upsell_no", "upsell no"}
+	negativeExact := []string{"no", "nel", "nop", "nope", "upsell_no", "upsell no", "pickup_upsell_no"}
 	for _, w := range negativeExact {
 		if s == w {
 			return true

@@ -170,10 +170,24 @@ func HandlePickup(
 			return res
 		}
 
-		// Caso 2: El usuario intenta pedir un producto — validar contra catálogo con IA
+		// Caso 2: El usuario intenta pedir un producto — validar contra catálogo con IA (Agente Maestro)
 		if len(products) > 0 && apiKey != "" {
-			productName, quantity, found := pickProductWithAI(userInput, products, []models.AIMessage{}, apiKey)
-			if found {
+			recentHistory := []models.AIMessage{}
+			storeAddr := context["store"] + ", " + context["city"]
+			cartStr := context["products"]
+			action, aiMsg, productName, quantity := processOrderAI(userInput, storeAddr, cartStr, products, recentHistory, apiKey)
+			
+			if action == "reply" {
+				res.Message = aiMsg
+				res.NextState = StatePickupAwaitingProduct
+				res.Buttons = []models.InteractiveButton{
+					{ID: "confirm_cancel", Title: "❌ Cancelar pedido"},
+				}
+				res.NewContext = context
+				return res
+			}
+
+			if action == "add_product" {
 				// Encontrar el producto real y confirmar
 				var matched *models.Product
 				for i, p := range products {
@@ -189,7 +203,16 @@ func HandlePickup(
 					} else {
 						context["products"] += fmt.Sprintf(", %dx %s", quantity, matched.Name)
 					}
-					res.Message = fmt.Sprintf("🍕 ¡Perfecto! Agregué *%dx %s* a tu pedido.\n\n¿Te gustaría añadir algo más?", quantity, matched.Name)
+					
+					upsellMsg := aiMsg
+					if upsellMsg == "" {
+						upsellMsg = fmt.Sprintf("🍕 ¡Excelente elección! Agregué *%dx %s* a tu pedido. ", quantity, matched.Name)
+					} else {
+						upsellMsg += " "
+					}
+					upsellMsg += "¿Deseas agregar algo más o confirmamos tu pedido?"
+					
+					res.Message = upsellMsg
 					res.NextState = StatePickupUpsell
 					res.Buttons = []models.InteractiveButton{
 						{ID: "pickup_upsell_yes", Title: "✅ Sí, agregar más"},

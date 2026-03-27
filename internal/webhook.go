@@ -520,18 +520,18 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		switch textNorm {
 		case "menu_domicilio":
 			session.Metadata["active_agent"] = "delivery"
-			// Iniciar flujo de domicilio directamente en AWAITING_ADDRESS
 			delSession := &agents.DeliverySession{State: agents.StateDeliveryIdle}
-			// Sincronizar dirección registrada
 			if addr, ok := session.Metadata["customer_address"].(string); ok {
 				delSession.Address = addr
 			}
-			dsBytes, _ := json.Marshal(delSession)
-			session.Metadata["delivery_context"] = string(dsBytes)
 			products, _ := h.repo.GetProducts(ctx, tenant.ID)
-			// Llamar a HandleDelivery con entrada vacía para disparar el primer mensaje (confirmación o solicitud)
 			resp := agents.HandleDelivery(ctx, delSession, "", "", session.History, products)
 			aiReply = resp.Message
+			
+			// GUARDAR EL ESTADO MUTADO
+			dsBytes, _ := json.Marshal(resp.NewSession)
+			session.Metadata["delivery_context"] = string(dsBytes)
+
 			if len(resp.Buttons) > 0 {
 				_ = SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
 					"", aiReply, "", resp.Buttons)
