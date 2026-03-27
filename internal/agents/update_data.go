@@ -3,13 +3,12 @@ package agents
 import (
 	"encoding/json"
 	"fmt"
+	"multi-tenant-bot/internal/models"
 	"multi-tenant-bot/internal/pos"
 	"strings"
 )
 
-const SystemPromptUpdate = `Eres un asistente especializado en actualizar la información personal de clientes registrados.
-Guía al usuario de forma segura para modificar únicamente sus propios datos.
-Tono claro y preciso; confirma cada cambio antes de aplicarlo.`
+const SystemPromptUpdate = `Eres un asistente especializado en actualizar la información personal de clientes registrados.`
 
 const (
 	StateUpdateSelectField = "UPDATE_SELECT_FIELD"
@@ -27,29 +26,33 @@ func HandleUpdateData(userInput string, currentState string, currentContext stri
 	var res PickupResponse
 	api := pos.NewInOutClient()
 
+	backBtn := models.InteractiveButton{ID: "menu_principal", Title: "🏠 Menú Principal"}
+
 	switch currentState {
 	case "UPDATE_START", "IDLE", "":
 		res.Message = "👤 *Actualizar Datos*\n━━━━━━━━━━━━━━━━\n\n¿Qué dato deseas actualizar?\n\n1️⃣ Nombre\n2️⃣ Correo electrónico\n3️⃣ Teléfono\n4️⃣ Dirección"
 		res.NextState = StateUpdateSelectField
+		res.Buttons = []models.InteractiveButton{
+			{ID: "upd_field_1", Title: "1️⃣ Nombre"},
+			{ID: "upd_field_4", Title: "4️⃣ Dirección"},
+			backBtn,
+		}
 
 	case StateUpdateSelectField:
 		fieldName := ""
 		fieldLabel := ""
+
+		// Mapear botones de selección rápida
 		switch userInput {
-		case "1":
-			fieldName = "name"
-			fieldLabel = "nombre"
-		case "2":
-			fieldName = "email"
-			fieldLabel = "correo electrónico"
-		case "3":
-			fieldName = "phone"
-			fieldLabel = "teléfono"
-		case "4":
-			fieldName = "address"
-			fieldLabel = "dirección"
+		case "upd_field_1", "1":
+			fieldName, fieldLabel = "name", "nombre"
+		case "upd_field_2", "2":
+			fieldName, fieldLabel = "email", "correo electrónico"
+		case "upd_field_3", "3":
+			fieldName, fieldLabel = "phone", "teléfono"
+		case "upd_field_4", "4":
+			fieldName, fieldLabel = "address", "dirección"
 		default:
-			// Intentar mapear texto libre
 			lower := strings.ToLower(strings.TrimSpace(userInput))
 			switch {
 			case strings.Contains(lower, "nombre"):
@@ -61,8 +64,13 @@ func HandleUpdateData(userInput string, currentState string, currentContext stri
 			case strings.Contains(lower, "direccion") || strings.Contains(lower, "dirección"):
 				fieldName, fieldLabel = "address", "dirección"
 			default:
-				res.Message = "No reconocí esa opción. Por favor responde con 1, 2, 3 o 4:\n\n1️⃣ Nombre\n2️⃣ Correo\n3️⃣ Teléfono\n4️⃣ Dirección"
+				res.Message = "No reconocí esa opción. Por favor elige una:\n\n1️⃣ Nombre\n2️⃣ Correo\n3️⃣ Teléfono\n4️⃣ Dirección"
 				res.NextState = StateUpdateSelectField
+				res.Buttons = []models.InteractiveButton{
+					{ID: "upd_field_1", Title: "1️⃣ Nombre"},
+					{ID: "upd_field_4", Title: "4️⃣ Dirección"},
+					backBtn,
+				}
 				res.NewContext = context
 				return res
 			}
@@ -70,21 +78,35 @@ func HandleUpdateData(userInput string, currentState string, currentContext stri
 
 		context["field_to_update"] = fieldName
 		context["field_label"] = fieldLabel
-		res.Message = fmt.Sprintf("Entendido. Por favor ingresa el nuevo valor para tu *%s*:", fieldLabel)
+		res.Message = fmt.Sprintf("✏️ Por favor ingresa tu nuevo *%s*:", fieldLabel)
 		res.NextState = StateUpdateAwaitingVal
+		res.Buttons = []models.InteractiveButton{backBtn}
 
 	case StateUpdateAwaitingVal:
 		context["new_value"] = userInput
-		res.Message = fmt.Sprintf("¿Confirmas cambiar tu *%s* a:\n\n📝 *%s*\n\n¿Es correcto? (Sí/No)",
+		res.Message = fmt.Sprintf("¿Confirmas actualizar tu *%s* a:\n\n📝 *%s*?",
 			context["field_label"], userInput)
 		res.NextState = StateUpdateConfirm
+		res.Buttons = []models.InteractiveButton{
+			{ID: "upd_confirm_yes", Title: "✅ Sí, actualizar"},
+			{ID: "upd_confirm_no", Title: "❌ Cancelar"},
+			backBtn,
+		}
 
 	case StateUpdateConfirm:
-		if strings.ToLower(strings.TrimSpace(userInput)) == "si" || strings.ToLower(strings.TrimSpace(userInput)) == "sí" {
+		confirmed := userInput == "upd_confirm_yes" ||
+			strings.ToLower(strings.TrimSpace(userInput)) == "si" ||
+			strings.ToLower(strings.TrimSpace(userInput)) == "sí"
+
+		if confirmed {
 			userID := context["customer_id"]
 			if userID == "" {
 				res.Message = "No encontré tu perfil en sesión. Por favor contacta soporte."
 				res.NextState = "IDLE"
+				res.Buttons = []models.InteractiveButton{
+					{ID: "menu_4", Title: "🎧 Ir a Soporte"},
+					backBtn,
+				}
 				res.NewContext = context
 				return res
 			}
@@ -95,16 +117,29 @@ func HandleUpdateData(userInput string, currentState string, currentContext stri
 
 			err := api.UpdateUser(userID, updateData)
 			if err != nil {
-				res.Message = fmt.Sprintf("Lo siento, no pudimos actualizar tu %s en este momento. Por favor intenta más tarde o contacta soporte.", context["field_label"])
+				res.Message = fmt.Sprintf("Lo siento, no pudimos actualizar tu *%s*. Por favor intenta más tarde.", context["field_label"])
 				res.NextState = "IDLE"
 			} else {
-				res.Message = fmt.Sprintf("✅ ¡Tu *%s* ha sido actualizado a *%s* correctamente!\n\n¿Necesitas actualizar otro dato?",
+				res.Message = fmt.Sprintf("✅ ¡Tu *%s* ha sido actualizado exitosamente a:\n\n📝 *%s*\n\n¿Deseas actualizar otro dato?",
 					context["field_label"], context["new_value"])
-				res.NextState = "FINISHED"
+				res.NextState = StateUpdateSelectField
+				context["field_to_update"] = ""
+				context["field_label"] = ""
+				context["new_value"] = ""
+			}
+			res.Buttons = []models.InteractiveButton{
+				{ID: "upd_field_1", Title: "1️⃣ Nombre"},
+				{ID: "upd_field_4", Title: "4️⃣ Dirección"},
+				backBtn,
 			}
 		} else {
-			res.Message = "Actualización cancelada. ¿Deseas actualizar otro dato?\n\n1️⃣ Nombre\n2️⃣ Correo\n3️⃣ Teléfono\n4️⃣ Dirección"
+			res.Message = "Actualización cancelada. ¿Deseas modificar otro dato?"
 			res.NextState = StateUpdateSelectField
+			res.Buttons = []models.InteractiveButton{
+				{ID: "upd_field_1", Title: "1️⃣ Nombre"},
+				{ID: "upd_field_4", Title: "4️⃣ Dirección"},
+				backBtn,
+			}
 		}
 	}
 

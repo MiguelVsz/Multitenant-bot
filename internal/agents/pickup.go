@@ -3,8 +3,9 @@ package agents
 import (
 	"encoding/json"
 	"fmt"
-	"multi-tenant-bot/internal/pos"
+	"multi-tenant-bot/internal/models"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -14,7 +15,6 @@ const (
 	StatePickupAwaitingProduct = "PICKUP_AWAITING_PRODUCT"
 	StatePickupUpsell          = "PICKUP_UPSELL"
 	StatePickupConfirming      = "PICKUP_CONFIRMING"
-	StatePickupAwaitingPayment = "PICKUP_AWAITING_PAYMENT"
 )
 
 // PickupResponse define la estructura de lo que devuelve la función
@@ -22,9 +22,11 @@ type PickupResponse struct {
 	Message    string
 	NextState  string
 	NewContext map[string]string
+	Buttons    []models.InteractiveButton
 }
 
-func HandlePickup(userInput string, currentState string, currentContext string) PickupResponse {
+// HandlePickup maneja el flujo de recogida en tienda usando zonas de cobertura de la BD
+func HandlePickup(userInput string, currentState string, currentContext string, zones []models.CoverageZone) PickupResponse {
 	var context map[string]string
 	json.Unmarshal([]byte(currentContext), &context)
 	if context == nil {
@@ -32,98 +34,200 @@ func HandlePickup(userInput string, currentState string, currentContext string) 
 	}
 
 	var res PickupResponse
-	api := pos.NewInOutClient()
 
 	switch currentState {
 	case "IDLE", "":
-		res.Message = "🥡 *Recoger en Tienda*\n━━━━━━━━━━━━━━━━\n\n¡Perfecto! Dime en qué *ciudad* te encuentras para mostrarte los puntos de recogida disponibles."
+		res.Message = "🥡 *Recoger en Tienda*\n━━━━━━━━━━━━━━━━\n\n¡Perfecto! ¿En qué *ciudad* te encuentras para mostrarte los puntos de recogida disponibles?"
 		res.NextState = StatePickupAwaitingCity
+		res.Buttons = []models.InteractiveButton{
+			{ID: "menu_principal", Title: "🏠 Menú Principal"},
+		}
 
 	case StatePickupAwaitingCity:
-		context["city"] = userInput
-		stores, err := api.GetPointSales()
-		if err != nil || len(stores) == 0 {
-			res.Message = "Lo siento, hubo un problema al consultar nuestras tiendas. Por favor intenta de nuevo en unos minutos."
+		city := strings.TrimSpace(userInput)
+		context["city"] = city
+
+		// Filtrar zonas por nombre de ciudad (búsqueda flexible)
+		matched := filterZonesByCity(zones, city)
+
+		if len(matched) == 0 {
+			// Si no hay coincidencia, mostrar todas las zonas
+			matched = zones
+		}
+
+		if len(matched) == 0 {
+			res.Message = "Lo siento, no encontré puntos de recogida disponibles en este momento. Por favor contacta a soporte."
 			res.NextState = "IDLE"
+			res.Buttons = []models.InteractiveButton{
+				{ID: "menu_4", Title: "🎧 Ir a Soporte"},
+				{ID: "menu_principal", Title: "🏠 Menú Principal"},
+			}
 			res.NewContext = context
 			return res
 		}
 
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("🏪 Puntos de recogida en *%s*:\n", userInput))
+		sb.WriteString(fmt.Sprintf("🏪 Puntos de recogida disponibles cerca de *%s*:\n", city))
 		sb.WriteString("─────────────────────\n\n")
-		for i, name := range stores {
-			sb.WriteString(fmt.Sprintf("%d️⃣ %s\n", i+1, name))
+
+		// Guardar IDs de tiendas para selección posterior
+		var storeIDs []string
+		var storeNames []string
+		for i, z := range matched {
+			sb.WriteString(fmt.Sprintf("%d️⃣ *%s*\n", i+1, z.Name))
+			storeIDs = append(storeIDs, z.ID)
+			storeNames = append(storeNames, z.Name)
 		}
-		sb.WriteString("\n¿En cuál punto deseas recoger tu pedido?")
-		context["stores_list"] = strings.Join(stores, "|")
+		sb.WriteString("\n¿En cuál de ellos quieres recoger tu pedido? (Responde con el número)")
+
+		context["store_ids"] = strings.Join(storeIDs, "|")
+		context["store_names"] = strings.Join(storeNames, "|")
 		res.Message = sb.String()
 		res.NextState = StatePickupAwaitingStore
+		res.Buttons = []models.InteractiveButton{
+			{ID: "menu_principal", Title: "🏠 Menú Principal"},
+		}
 
 	case StatePickupAwaitingStore:
-		storeName := userInput
+		storeNames := strings.Split(context["store_names"], "|")
+		storeName := strings.TrimSpace(userInput)
+
 		// Intentar resolver por número
-		storesList := strings.Split(context["stores_list"], "|")
 		idx := 0
 		fmt.Sscanf(strings.TrimSpace(userInput), "%d", &idx)
-		if idx > 0 && idx <= len(storesList) {
-			storeName = storesList[idx-1]
+		if idx > 0 && idx <= len(storeNames) {
+			storeName = storeNames[idx-1]
+		} else {
+			// Buscar por nombre aproximado
+			for _, name := range storeNames {
+				if strings.Contains(normalizeText(name), normalizeText(userInput)) ||
+					strings.Contains(normalizeText(userInput), normalizeText(name)) {
+					storeName = name
+					break
+				}
+			}
 		}
+
 		context["store"] = storeName
-		res.Message = fmt.Sprintf("📍 Seleccionaste: *%s*\n\n¿Confirmas que recogerás aquí tu pedido?", storeName)
+		res.Message = fmt.Sprintf("📍 Has seleccionado: *%s*\n\n¿Confirmas que recogerás aquí tu pedido?", storeName)
 		res.NextState = StatePickupConfirmingStore
+		res.Buttons = []models.InteractiveButton{
+			{ID: "pickup_confirm_store", Title: "✅ Sí, confirmar"},
+			{ID: "pickup_change_store", Title: "🔄 Cambiar punto"},
+			{ID: "menu_principal", Title: "🏠 Menú Principal"},
+		}
 
 	case StatePickupConfirmingStore:
-		if isPositive(userInput) || strings.ToLower(strings.TrimSpace(userInput)) == "si" {
-			res.Message = fmt.Sprintf("✅ Perfecto. Tu pedido será para recoger en *%s*.\n\nPuedes ver nuestro menú aquí 👉 https://menu.donpepe.com\n\n¿Qué productos deseas ordenar? Escríbelos aquí:", context["store"])
+		if textNorm := normalizeText(userInput); textNorm == "pickup_confirm_store" || isPositive(userInput) {
+			res.Message = fmt.Sprintf("✅ Perfecto. Tu pedido será para recoger en *%s*.\n\n¿Qué productos deseas ordenar? Escríbelos aquí o consulta nuestra carta:", context["store"])
 			res.NextState = StatePickupAwaitingProduct
-		} else if isNegative(userInput) {
+			res.Buttons = []models.InteractiveButton{
+				{ID: "menu_1", Title: "🍕 Ver Carta"},
+				{ID: "menu_principal", Title: "🏠 Menú Principal"},
+			}
+		} else if userInput == "pickup_change_store" || isNegative(userInput) {
 			res.Message = "Sin problema. ¿En qué ciudad buscas el punto de recogida?"
 			res.NextState = StatePickupAwaitingCity
 			delete(context, "store")
+			res.Buttons = []models.InteractiveButton{
+				{ID: "menu_principal", Title: "🏠 Menú Principal"},
+			}
 		} else {
-			res.Message = fmt.Sprintf("¿Confirmas recoger en *%s*? (Sí/No)", context["store"])
+			res.Message = fmt.Sprintf("¿Confirmas recoger en *%s*?", context["store"])
 			res.NextState = StatePickupConfirmingStore
+			res.Buttons = []models.InteractiveButton{
+				{ID: "pickup_confirm_store", Title: "✅ Sí, confirmar"},
+				{ID: "pickup_change_store", Title: "🔄 Cambiar punto"},
+				{ID: "menu_principal", Title: "🏠 Menú Principal"},
+			}
 		}
 
 	case StatePickupAwaitingProduct:
+		if strings.HasPrefix(normalizeText(userInput), "menu_") || userInput == "menu_principal" {
+			// Deja que el webhook lo maneje
+			res.Message = ""
+			res.NextState = "IDLE"
+			res.NewContext = context
+			return res
+		}
 		context["products"] = userInput
-		res.Message = fmt.Sprintf("🍕 ¡Excelente elección con *%s*!\n\n¿Te gustaría agregar algo más a tu pedido? Por ejemplo, una bebida o acompañamiento. (Responde Sí/No)", userInput)
+		res.Message = fmt.Sprintf("🍕 ¡Excelente elección con *%s*!\n\n¿Te gustaría añadir algún acompañante o bebida a tu pedido?", userInput)
 		res.NextState = StatePickupUpsell
+		res.Buttons = []models.InteractiveButton{
+			{ID: "pickup_upsell_yes", Title: "✅ Sí, agregar"},
+			{ID: "pickup_upsell_no", Title: "👎 No, continuar"},
+			{ID: "menu_principal", Title: "🏠 Menú Principal"},
+		}
 
 	case StatePickupUpsell:
-		if isPositive(userInput) {
-			context["upsell"] = "Bebida o acompañamiento adicional"
-			res.Message = "¡Genial! Agrega ese complemento a tu pedido. Descríbelo:"
+		if userInput == "pickup_upsell_yes" || isPositive(userInput) {
+			context["upsell"] = "si"
+			res.Message = "¿Qué más deseas agregar? Escríbelo:"
 			res.NextState = StatePickupAwaitingProduct
-			// Guardamos el estado del upsell pero volvemos a pedir más productos
-			context["upsell_applied"] = "si"
+			context["products"] = context["products"] + " (+ extras)"
 		} else {
-			// Mostrar resumen
-			upsellText := ""
-			if context["upsell_applied"] == "si" {
-				upsellText = "\n• Complementos: ✅ Agregados"
-			}
 			res.Message = fmt.Sprintf(
-				"📝 *Resumen de tu pedido (Recogida en Tienda)*\n━━━━━━━━━━━━━━━━\n• Punto: %s\n• Ciudad: %s\n• Productos: %s%s\n\n💰 El precio final se calculará en tienda.\n\n¿Confirmas tu pedido? (Sí/No)",
-				context["store"], context["city"], context["products"], upsellText,
+				"📝 *Resumen de tu pedido – Recogida en Tienda*\n━━━━━━━━━━━━━━━━\n📍 Punto: *%s*\n🏙️ Ciudad: *%s*\n🛒 Productos: *%s*\n\n💰 El precio final se confirma en tienda.\n\n¿Confirmas tu pedido?",
+				context["store"], context["city"], context["products"],
 			)
 			res.NextState = StatePickupConfirming
+			res.Buttons = []models.InteractiveButton{
+				{ID: "pickup_final_ok", Title: "✅ Confirmar pedido"},
+				{ID: "pickup_final_cancel", Title: "❌ Cancelar"},
+			}
 		}
 
 	case StatePickupConfirming:
-		if isPositive(userInput) {
+		if userInput == "pickup_final_ok" || isPositive(userInput) {
 			res.Message = fmt.Sprintf(
-				"✅ *¡Pedido confirmado!*\n\nTu pedido para recoger en *%s* ha sido registrado.\n\n🏪 Dirígete al local con esta confirmación.\n⏱️ Tiempo estimado de preparación: 20-30 minutos.\n\n¡Gracias por elegirnos! 🍕",
+				"✅ *¡Pedido confirmado!*\n\nTu pedido para recoger en *%s* ha sido registrado.\n\n⏱️ Tiempo estimado: 20-30 min.\n\n¡Gracias por elegirnos! 🍕",
 				context["store"],
 			)
 			res.NextState = "FINISHED"
+			res.Buttons = []models.InteractiveButton{
+				{ID: "menu_principal", Title: "🏠 Menú Principal"},
+			}
 		} else {
-			res.Message = "Entendido, he cancelado el proceso. Si deseas iniciar de nuevo, selecciona 🥡 *Recoger en Tienda* desde el menú."
+			res.Message = "Pedido cancelado. Si deseas iniciar de nuevo, selecciona *Recoger en Tienda* desde el menú."
 			res.NextState = "IDLE"
+			res.Buttons = []models.InteractiveButton{
+				{ID: "menu_principal", Title: "🏠 Menú Principal"},
+			}
 		}
 	}
 
 	res.NewContext = context
 	return res
+}
+
+// filterZonesByCity filtra las zonas de cobertura por nombre de ciudad (búsqueda flexible)
+func filterZonesByCity(zones []models.CoverageZone, city string) []models.CoverageZone {
+	cityNorm := normalizeText(city)
+	var matched []models.CoverageZone
+	for _, z := range zones {
+		zoneNorm := normalizeText(z.Name)
+		if strings.Contains(zoneNorm, cityNorm) || strings.Contains(cityNorm, zoneNorm) {
+			matched = append(matched, z)
+		}
+	}
+	return matched
+}
+
+// normalizeText normaliza texto para comparación (minúsculas, sin tildes)
+func normalizeText(s string) string {
+	replacer := strings.NewReplacer(
+		"á", "a", "é", "e", "í", "i", "ó", "o", "ú", "u",
+		"Á", "a", "É", "e", "Í", "i", "Ó", "o", "Ú", "u",
+		"ñ", "n", "Ñ", "n",
+	)
+	cleaned := replacer.Replace(s)
+	var b strings.Builder
+	for _, r := range cleaned {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) || r == '_' {
+			b.WriteRune(unicode.ToLower(r))
+		} else {
+			b.WriteRune(' ')
+		}
+	}
+	return strings.TrimSpace(b.String())
 }

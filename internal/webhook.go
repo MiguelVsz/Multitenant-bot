@@ -142,12 +142,11 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		strings.Contains(textNorm, "nueva sesion")
 
 	// Interceptor de Botones Reservados (menu_, confirm_cancel, MENU_PRINCIPAL, etc)
+	// NOTA: use_reg_addr y use_new_addr NO van aquí — los maneja el agente delivery internamente.
 	isMenuCommand := strings.HasPrefix(textNorm, "menu_") ||
 		textNorm == "confirm_cancel" ||
 		textNorm == "menu principal" ||
 		textNorm == "menu_principal" ||
-		textNorm == "use_reg_addr" ||
-		textNorm == "use_new_addr" ||
 		textNorm == "confirm_addr_yes" ||
 		textNorm == "confirm_addr_no"
 
@@ -395,8 +394,10 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			}
 		}
 
+		// Obtener zonas de cobertura de la BD para el agente pickup
+		zones, _ := h.repo.GetCoverageZones(ctx, tenant.ID)
 		pickState, _ := session.Metadata["pickup_state"].(string)
-		resp := agents.HandlePickup(msg.Text, pickState, mustMarshalContext(pickSession))
+		resp := agents.HandlePickup(msg.Text, pickState, mustMarshalContext(pickSession), zones)
 
 		aiReply = resp.Message
 		session.Metadata["pickup_state"] = resp.NextState
@@ -407,6 +408,20 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			delete(session.Metadata, "active_agent")
 			delete(session.Metadata, "pickup_context")
 			delete(session.Metadata, "pickup_state")
+			if aiReply == "" {
+				return h.sendMainMenu(ctx, tenant, session, msg, "Recogida cancelada. ¿En qué más podemos ayudarte?")
+			}
+		}
+
+		if len(resp.Buttons) > 0 {
+			err := SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
+				"", aiReply, "", resp.Buttons)
+			if err != nil {
+				h.log.Error("failed to send pickup buttons", "err", err)
+				return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
+			}
+			session.History = append(session.History, models.AIMessage{Role: "assistant", Content: aiReply})
+			return h.sessions.Save(ctx, session)
 		}
 	case "update_data":
 		var udSession map[string]string
@@ -434,6 +449,17 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			delete(session.Metadata, "active_agent")
 			delete(session.Metadata, "update_data_context")
 			delete(session.Metadata, "update_data_state")
+		}
+
+		if len(resp.Buttons) > 0 {
+			err := SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
+				"", aiReply, "", resp.Buttons)
+			if err != nil {
+				h.log.Error("failed to send update_data buttons", "err", err)
+				return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
+			}
+			session.History = append(session.History, models.AIMessage{Role: "assistant", Content: aiReply})
+			return h.sessions.Save(ctx, session)
 		}
 	default:
 		textTrim := strings.TrimSpace(msg.Text)
@@ -623,11 +649,22 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 			if cid, ok := session.Metadata["customer_id"].(string); ok {
 				initCtx["customer_id"] = cid
 			}
-			resp := agents.HandlePickup("", "IDLE", mustMarshalContext(initCtx))
+			pickZones, _ := h.repo.GetCoverageZones(ctx, tenant.ID)
+			resp := agents.HandlePickup("", "IDLE", mustMarshalContext(initCtx), pickZones)
 			aiReply = resp.Message
 			session.Metadata["pickup_state"] = resp.NextState
 			pkBytes, _ := json.Marshal(resp.NewContext)
 			session.Metadata["pickup_context"] = string(pkBytes)
+			if len(resp.Buttons) > 0 {
+				err := SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
+					"", aiReply, "", resp.Buttons)
+				if err != nil {
+					h.log.Error("failed to send pickup initial buttons", "err", err)
+					return h.finalizeMessage(ctx, tenant, session, msg, aiReply)
+				}
+				session.History = append(session.History, models.AIMessage{Role: "assistant", Content: aiReply})
+				return h.sessions.Save(ctx, session)
+			}
 		case agents.RouteIntentUpdateData:
 			session.Metadata["active_agent"] = "update_data"
 			initCtx := map[string]string{}
