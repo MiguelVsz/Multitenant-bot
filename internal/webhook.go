@@ -291,10 +291,9 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 				OrderType:       "delivery",
 				Status:          "pending",
 				DeliveryAddress: resp.NewSession.Address,
-				Subtotal:        resp.NewSession.Total, // Asignamos subtotal
-				DeliveryFee:     0,                     // Por ahora 0, se puede mejorar
+				Subtotal:        resp.NewSession.Total,
 				Total:           resp.NewSession.Total,
-				PaymentMethod:   "not_specified",
+				PaymentMethod:   textNorm,
 				Items:           resp.NewSession.Cart,
 			}
 			if err := h.repo.CreateOrder(ctx, order); err != nil {
@@ -315,8 +314,8 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 		switch textNorm {
 		case "menu_domicilio":
 			session.Metadata["active_agent"] = "delivery"
-			// Iniciar flujo de domicilio
-			delSession := &agents.DeliverySession{State: agents.StateDeliveryIdle}
+			// Iniciar flujo de domicilio directamente en AWAITING_ADDRESS
+			delSession := &agents.DeliverySession{State: agents.StateDeliveryAwaitingAddress}
 			dsBytes, _ := json.Marshal(delSession)
 			session.Metadata["delivery_context"] = string(dsBytes)
 			aiReply = "¡Excelente elección! Vamos a tomar tu pedido a domicilio. ¿A qué dirección lo enviamos?"
@@ -393,26 +392,16 @@ func (h *WebhookHandler) processMessage(ctx context.Context, msg IncomingMessage
 					}
 					sb.WriteString(fmt.Sprintf("%d. %s: $%.0f%s\n", i+1, p.Name, p.Price, desc))
 				}
-				sb.WriteString("\n¿Qué deseas ordenar? Escribe el nombre del producto o elige otra opción escribiendo *menu principal*.")
-				aiReply = sb.String()
-
-				// Vincular con Delivery si el usuario ya mencionó un producto (Contextual)
-				// Si el mensaje actual es el nombre de un producto, forzamos entrada a delivery
-				for _, p := range products {
-					if strings.Contains(strings.ToLower(msg.Text), strings.ToLower(p.Name)) {
-						session.Metadata["active_agent"] = "delivery"
-						delSession := &agents.DeliverySession{
-							State:       agents.StateDeliveryAwaitingAddress,
-							PhoneNumber: msg.From,
-							CustomerID:  session.Metadata["customer_id"],
-						}
-						// Inyectamos el producto en el cart si lo identificamos plenamente (Opcional)
-						dsBytes, _ := json.Marshal(delSession)
-						session.Metadata["delivery_context"] = string(dsBytes)
-						aiReply = "¡Perfecto! Veo que quieres pedir " + p.Name + ". ¿A qué dirección lo enviamos?"
-						break
-					}
+				buttons := []models.InteractiveButton{
+					{ID: "MENU_PRINCIPAL", Title: "🏠 Menú Principal"},
 				}
+				err := SendWhatsAppButton(ctx, msg.PhoneNumberID, msg.From, tenant.WhatsAppToken,
+					"Nuestra Carta", sb.String(), "", buttons)
+				if err != nil {
+					h.log.Error("failed to send carta buttons", "err", err)
+					return h.finalizeMessage(ctx, tenant, session, msg, sb.String())
+				}
+				return h.sessions.Save(ctx, session)
 			}
 		case agents.RouteIntentLocations:
 			zones, err := h.repo.GetCoverageZones(ctx, tenant.ID)

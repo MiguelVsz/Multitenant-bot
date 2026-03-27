@@ -307,29 +307,59 @@ func HandleSAC(input string) string {
 }
 
 func cleanAIReply(reply string) string {
-	// Remover etiquetas como *VALIDACION*, *DIAGNOSTICO*, *PLAN DE ACCION*
-	tags := []string{"VALIDACION", "DIAGNOSTICO", "PLAN DE ACCION", "PLAN DE ACCIÓN"}
+	// Remover markdown bold markers
+	reply = strings.ReplaceAll(reply, "**", "")
+
+	// Etiquetas y prefijos de razonamiento interno a eliminar
+	internalTags := []string{
+		"VALIDACION", "DIAGNOSTICO", "PLAN DE ACCION", "PLAN DE ACCIÓN",
+		"VALIDACIÓN", "DIAGNÓSTICO", "SELECCIONO", "SELECCIONO MENU",
+		"ANADE", "AÑADE", "REGISTRO", "ERROR",
+	}
 	
 	lines := strings.Split(reply, "\n")
 	var cleanedLines []string
 	
 	for _, line := range lines {
-		upperLine := strings.ToUpper(line)
-		isTag := false
-		for _, tag := range tags {
-			if strings.Contains(upperLine, "*"+tag+"*") {
-				// Eliminamos la línea si es puramente diagnóstica (corta)
-				if len(line) < len(tag)+12 { 
-					isTag = true
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine == "" {
+			continue
+		}
+
+		upperLine := strings.ToUpper(trimmedLine)
+		isInternal := false
+
+		// 1. Eliminar líneas que son puramente etiquetas internas
+		for _, tag := range internalTags {
+			// Caso: "*TAG*" o "TAG:"
+			if strings.Contains(upperLine, "*"+tag+"*") || 
+			   strings.HasPrefix(upperLine, tag+":") || 
+			   strings.HasPrefix(upperLine, "- "+tag+":") {
+				
+				// Si la línea es corta y parece solo un encabezado
+				if len(trimmedLine) < len(tag)+15 {
+					isInternal = true
 					break
 				}
-				// Si tiene contenido útil después del tag, limpiamos solo el tag
+				// Si es larga, intentamos limpiar el prefijo
 				line = strings.Replace(line, "*"+tag+"*:", "", -1)
 				line = strings.Replace(line, "*"+tag+"*", "", -1)
+				line = strings.Replace(line, tag+":", "", -1)
 				line = strings.TrimSpace(line)
 			}
 		}
-		if !isTag && strings.TrimSpace(line) != "" {
+
+		// 2. Filtro heurístico para líneas que no parecen ser para el cliente
+		// Ej: "Selecciono menu 4.", "Falta información."
+		if !isInternal {
+			if strings.HasPrefix(upperLine, "SELECCIONO") || 
+			   strings.HasPrefix(upperLine, "FALTA INFORMACIÓN") || 
+			   strings.HasPrefix(upperLine, "FALTA INFORMACION") {
+				isInternal = true
+			}
+		}
+
+		if !isInternal && strings.TrimSpace(line) != "" {
 			cleanedLines = append(cleanedLines, line)
 		}
 	}

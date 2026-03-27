@@ -147,8 +147,9 @@ func HandleDelivery(
 				NextState:  StateDeliveryPayment,
 				NewSession: session,
 				Buttons: []models.InteractiveButton{
-					{ID: "pay_cash", Title: "💵 Efectivo"},
-					{ID: "pay_transfer", Title: "📲 Transferencia"},
+					{ID: "cash", Title: "💵 Efectivo"},
+					{ID: "transfer", Title: "📲 Transferencia"},
+					{ID: "confirm_cancel", Title: "❌ Cancelar"},
 				},
 			}
 		}
@@ -171,7 +172,7 @@ func HandleDelivery(
 		}
 
 	case StateDeliveryPayment:
-		if textNorm == "pay_cash" || strings.Contains(textNorm, "efectivo") {
+		if textNorm == "cash" || strings.Contains(textNorm, "efectivo") {
 			session.State = StateDeliveryPlaced
 			return &DeliveryResponse{
 				Message:    "✅ Pago en Efectivo registrado. Estamos procesando tu orden... ¡Llegará pronto!",
@@ -179,7 +180,7 @@ func HandleDelivery(
 				NewSession: session,
 			}
 		}
-		if textNorm == "pay_transfer" || strings.Contains(textNorm, "transferencia") {
+		if textNorm == "transfer" || strings.Contains(textNorm, "transferencia") {
 			session.State = StateDeliveryPlaced
 			return &DeliveryResponse{
 				Message:    "✅ Pago por Transferencia registrado. Por favor envía el comprobante por aquí. Estamos procesando tu orden... ¡Llegará pronto!",
@@ -192,8 +193,8 @@ func HandleDelivery(
 			NextState:  StateDeliveryPayment,
 			NewSession: session,
 			Buttons: []models.InteractiveButton{
-				{ID: "pay_cash", Title: "💵 Efectivo"},
-				{ID: "pay_transfer", Title: "📲 Transferencia"},
+				{ID: "cash", Title: "💵 Efectivo"},
+				{ID: "transfer", Title: "📲 Transferencia"},
 				{ID: "confirm_cancel", Title: "❌ Cancelar"},
 			},
 		}
