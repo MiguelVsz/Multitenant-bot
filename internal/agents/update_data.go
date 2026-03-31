@@ -4,24 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"multi-tenant-bot/db"
-	"multi-tenant-bot/internal/pos"
 	"strings"
 )
 
+type UpdateResponse struct {
+	Message    string
+	NextState  string
+	NewContext map[string]string
+}
+
 const SystemPromptUpdate = `Eres un asistente especializado en actualizar la información personal de clientes registrados.
 Guía al usuario de forma segura para modificar únicamente sus propios datos.
-Tono claro y preciso; confirma cada cambio antes de aplicarlo.
-
-Flujo Estricto:
-1. Verifica identidad (sesión activa o código).
-2. Pregunta qué dato actualizar (nombre, teléfono, dirección, correo).
-3. Muestra el nuevo valor y pide confirmación.
-4. Llama a PATCH /users/{id}.
-5. Confirma el cambio realizado.
-6. Si la API falla, ofrece reintentar o contactar soporte.
-7. Registra el cambio en el log con timestamp.
-
-REGLAS: No modifiques datos sin confirmación explícita, no toques datos de otros usuarios, no omitas el log de auditoría.`
+Tono claro y preciso; confirma cada cambio antes de aplicarlo.`
 
 const (
 	StateUpdateSelectField = "UPDATE_SELECT_FIELD"
@@ -29,87 +23,167 @@ const (
 	StateUpdateConfirm     = "UPDATE_CONFIRMATION"
 )
 
-func HandleUpdateData(userInput string, currentState string, currentContext string) PickupResponse {
+// fieldLabel traduce el campo técnico a texto amigable
+func fieldLabel(field string) string {
+	switch field {
+	case "name":
+		return "nombre"
+	case "email":
+		return "correo electrónico"
+	case "whatsapp_phone":
+		return "teléfono"
+	case "default_address":
+		return "dirección"
+	default:
+		return field
+	}
+}
+
+func HandleUpdateData(userInput string, currentState string, currentContext string) UpdateResponse {
 	var context map[string]string
 	json.Unmarshal([]byte(currentContext), &context)
 	if context == nil {
 		context = make(map[string]string)
 	}
 
-	var res PickupResponse
-	api := pos.NewInOutClient()
+	var res UpdateResponse
 
 	switch currentState {
 	case "UPDATE_START", "IDLE", "":
-		var inoutRID string
-		var userID string
-		var name string
-		var email string
+		// En producción este número viene del mensaje de WhatsApp
+		// Buscamos con y sin '+' para cubrir ambos formatos
+		userPhone := "573003478228"
 
-		userPhone := "573195508310"
-		tenantID := context["tenant_id"]
-		if tenantID == "" {
-			tenantID = "ed2a4366-a42e-4043-a1ee-0a72cf897683" // ← fix principal
-		}
-
-		err := db.DB.QueryRow(db.QueryResolveUserByPhone, userPhone, tenantID).Scan(
-			&inoutRID,
-			&userID,
-			&name,
-			&email,
-		)
+		var customerID, name string
+		err := db.DB.QueryRow(`
+			SELECT id, name 
+			FROM gobot.customers 
+			WHERE whatsapp_phone = $1 
+			   OR whatsapp_phone = $2
+			LIMIT 1`,
+			userPhone, "+"+userPhone,
+		).Scan(&customerID, &name)
 
 		if err != nil {
-			fmt.Printf("[DEBUG] Usuario no en DB, buscando en API: %v\n", err)
-			inoutRID, _ = api.GetUserIDByPhone(userPhone)
-			name = "Usuario"
+			fmt.Printf("[DEBUG SQL ERROR]: %v\n", err)
+			res.Message = "No encontramos tu registro. Verifica que estés registrado en nuestro sistema."
+			res.NextState = "IDLE"
+			return res
 		}
 
-		context["user_id"] = inoutRID // 16617
-		res.Message = fmt.Sprintf("Hola %s, ¿qué dato quieres actualizar?\n1. Nombre\n2. Correo\n3. Teléfono secundario", name)
+		context["customer_id"] = customerID
+		context["customer_name"] = name
+
+		res.Message = fmt.Sprintf(
+			"Hola %s 👋 ¿Qué dato deseas actualizar?\n\n"+
+				"1. Nombre\n"+
+				"2. Correo electrónico\n"+
+				"3. Teléfono\n"+
+				"4. Dirección",
+			name,
+		)
 		res.NextState = StateUpdateSelectField
 
 	case StateUpdateSelectField:
-		field := userInput
-		if userInput == "1" {
+		field := ""
+		switch strings.TrimSpace(userInput) {
+		case "1":
 			field = "name"
-		}
-		if userInput == "2" {
+		case "2":
 			field = "email"
-		}
-		if userInput == "3" {
-			field = "phone"
+		case "3":
+			field = "whatsapp_phone"
+		case "4":
+			field = "default_address"
+		default:
+			// Si dice no, listo, gracias, etc → terminar
+			lower := strings.ToLower(strings.TrimSpace(userInput))
+			if lower == "no" || strings.Contains(lower, "listo") ||
+				strings.Contains(lower, "gracias") || strings.Contains(lower, "nada") {
+				res.Message = fmt.Sprintf(
+					"¡Perfecto %s! Tus datos están actualizados. 😊\n\nEscribe *menu principal* si necesitas algo más.",
+					context["customer_name"],
+				)
+				res.NextState = "FINISHED"
+				res.NewContext = context
+				return res
+			}
+			res.Message = "Por favor selecciona una opción válida (1, 2, 3 o 4)\no escribe *No* si ya terminaste."
+			res.NextState = StateUpdateSelectField
+			res.NewContext = context
+			return res
 		}
 
 		context["field_to_update"] = field
-		res.Message = fmt.Sprintf("Entendido. Por favor, ingresa el nuevo valor para: %s", field)
+		res.Message = fmt.Sprintf("Ingresa tu nuevo %s:", fieldLabel(field))
 		res.NextState = StateUpdateAwaitingVal
 
 	case StateUpdateAwaitingVal:
-		context["new_value"] = userInput
-		res.Message = fmt.Sprintf("Confirmas que quieres cambiar tu %s a: '%s'? (Sí/No)",
-			context["field_to_update"], userInput)
+		newValue := strings.TrimSpace(userInput)
+		if newValue == "" {
+			res.Message = "El valor no puede estar vacío. Intenta de nuevo."
+			res.NextState = StateUpdateAwaitingVal
+			res.NewContext = context
+			return res
+		}
+
+		context["new_value"] = newValue
+		res.Message = fmt.Sprintf(
+			"¿Confirmas cambiar tu *%s* a:\n\n➡️ *%s*\n\n¿Aplicamos el cambio? (Sí/No)",
+			fieldLabel(context["field_to_update"]),
+			newValue,
+		)
 		res.NextState = StateUpdateConfirm
 
 	case StateUpdateConfirm:
-		if strings.ToLower(userInput) == "si" || strings.ToLower(userInput) == "sí" {
-			updateData := map[string]interface{}{
-				context["field_to_update"]: context["new_value"],
-			}
+		input := strings.ToLower(strings.TrimSpace(userInput))
 
-			err := api.UpdateUser(context["user_id"], updateData)
-
-			if err != nil {
-				res.Message = fmt.Sprintf("Error técnico: %v. ¿Quieres intentar de nuevo?", err)
-				res.NextState = "IDLE"
-			} else {
-				res.Message = "✅ ¡Listo! Tus datos han sido actualizados con éxito en el sistema."
-				res.NextState = "FINISHED"
-			}
-		} else {
-			res.Message = "Actualización cancelada. Volviendo al menú."
-			res.NextState = "IDLE"
+		if input != "si" && input != "sí" {
+			res.Message = "Actualización cancelada. ¿Deseas cambiar otro dato?\n\n1. Nombre\n2. Correo electrónico\n3. Teléfono\n4. Dirección"
+			res.NextState = StateUpdateSelectField
+			res.NewContext = context
+			return res
 		}
+
+		campo := context["field_to_update"]
+		nuevoValor := context["new_value"]
+		customerID := context["customer_id"]
+
+		// Solo permitimos campos conocidos para evitar SQL injection
+		allowedFields := map[string]bool{
+			"name":            true,
+			"email":           true,
+			"whatsapp_phone":  true,
+			"default_address": true,
+		}
+
+		if !allowedFields[campo] {
+			res.Message = "Campo no permitido."
+			res.NextState = "IDLE"
+			res.NewContext = context
+			return res
+		}
+
+		query := fmt.Sprintf(
+			"UPDATE gobot.customers SET %s = $1, updated_at = NOW() WHERE id = $2",
+			campo,
+		)
+		_, err := db.DB.Exec(query, nuevoValor, customerID)
+
+		if err != nil {
+			fmt.Printf("[DEBUG SQL ERROR]: %v\n", err)
+			res.Message = "❌ Hubo un error al guardar los cambios. ¿Deseas intentarlo de nuevo? (Sí/No)"
+			res.NextState = StateUpdateConfirm
+			res.NewContext = context
+			return res
+		}
+
+		res.Message = fmt.Sprintf(
+			"✅ ¡Listo %s! Tu *%s* fue actualizado exitosamente.\n\n¿Deseas cambiar otro dato?\n\n1. Nombre\n2. Correo electrónico\n3. Teléfono\n4. Dirección\n\nO escribe *menu principal* para volver.",
+			context["customer_name"],
+			fieldLabel(campo),
+		)
+		res.NextState = StateUpdateSelectField
 	}
 
 	res.NewContext = context

@@ -4,35 +4,43 @@ import (
 	"encoding/json"
 	"fmt"
 	"multi-tenant-bot/db"
-	"multi-tenant-bot/internal/pos"
+	"strconv"
 	"strings"
-)
 
-const SystemPromptPickup = `Eres el asistente de WhatsApp para recogida en tienda.
-Sigue este flujo de forma estricta, sin improvisar pasos:
-
-1. Muestra ciudades disponibles (Por ahora solo Bogotá).
-2. Usuario elige ciudad.
-3. Muestra puntos de recogida.
-4. Usuario elige punto (si no es válido, vuelve al paso 3).
-5. Confirma nombre y dirección del punto.
-6. Envía URL del menú.
-7. Recibe selección + recomienda productos adicionales (upselling).
-8. Muestra resumen y pide confirmación (si no confirma, cancela).
-9. Envía link de pago.
-10. Guarda pedido con estado 'pendiente de pago'.`
-
-const (
-	StatePickupAwaitingCity    = "PICKUP_AWAITING_CITY"
-	StatePickupAwaitingStore   = "PICKUP_AWAITING_STORE"
-	StatePickupAwaitingProduct = "PICKUP_AWAITING_PRODUCT"
-	StatePickupConfirming      = "PICKUP_CONFIRMING"
+	"github.com/google/uuid"
 )
 
 type PickupResponse struct {
 	Message    string
 	NextState  string
 	NewContext map[string]string
+}
+
+const (
+	StatePickupAwaitingCity    = "PICKUP_AWAITING_CITY"
+	StatePickupAwaitingStore   = "PICKUP_AWAITING_STORE"
+	StatePickupAwaitingProduct = "PICKUP_AWAITING_PRODUCT"
+	StatePickupAwaitingUpsell  = "PICKUP_AWAITING_UPSELL"
+	StatePickupConfirming      = "PICKUP_CONFIRMING"
+)
+
+const SystemPromptPickup = `Eres el asistente de WhatsApp para recogida en tienda.
+Sigue este flujo de forma estricta, sin improvisar pasos:
+1. Ciudades (Bogotá). 
+2. Elegir ciudad. 
+3. Mostrar puntos. 
+4. Elegir punto. 
+5. Confirmar punto. 
+6. Menú. 
+7. Selección + Upselling. 
+8. Resumen. 
+9. Pago. 
+10. Guardar.`
+
+// productInfo guarda nombre y precio juntos
+type productInfo struct {
+	Name  string
+	Price float64
 }
 
 func HandlePickup(userInput string, currentState string, currentContext string) PickupResponse {
@@ -43,7 +51,6 @@ func HandlePickup(userInput string, currentState string, currentContext string) 
 	}
 
 	var res PickupResponse
-	api := pos.NewInOutClient()
 
 	switch currentState {
 	case "IDLE", "":
@@ -51,15 +58,45 @@ func HandlePickup(userInput string, currentState string, currentContext string) 
 		res.NextState = StatePickupAwaitingCity
 
 	case StatePickupAwaitingCity:
-		context["city"] = userInput
-		stores, err := api.GetPointSales()
-		if err != nil || len(stores) == 0 {
-			res.Message = "Lo siento, hubo un problema al consultar nuestras tiendas. Intenta de nuevo en unos minutos."
-			res.NextState = "IDLE"
+		cityName := strings.TrimSpace(userInput)
+		// No guardamos la ciudad aquí, la guardamos después con el nombre real de la BD
+		context["city_input"] = cityName
+		query := `
+			SELECT name 
+			FROM gobot.tenant_coverage_zones 
+			WHERE unaccent(lower(name)) ILIKE unaccent(lower($1))
+			AND active = true`
+		rows, err := db.DB.Query(query, "%"+cityName+"%")
+		if err != nil {
+			res.Message = "Error al conectar con la base de datos de sedes."
+			return res
+		}
+		defer rows.Close()
+
+		var stores []string
+		var firstCity string
+		for rows.Next() {
+			var name string
+			rows.Scan(&name)
+			stores = append(stores, name)
+			// Extraemos la ciudad del primer resultado (ej: "Bogotá Norte..." → "Bogotá")
+			if firstCity == "" {
+				parts := strings.SplitN(name, " ", 2)
+				firstCity = parts[0] // "Bogotá"
+			}
+		}
+		context["city"] = firstCity // ✅ Guardamos "Bogotá" con tilde
+
+		if len(stores) == 0 {
+			res.Message = fmt.Sprintf("No encontramos puntos en '%s'. ¿Puedes intentar con otra ciudad?", cityName)
 			return res
 		}
 
-		msg := fmt.Sprintf("Perfecto, en %s tenemos estos puntos disponibles:\n\n", userInput)
+		// Guardamos las tiendas en contexto como JSON
+		storesJSON, _ := json.Marshal(stores)
+		context["stores_list"] = string(storesJSON)
+
+		msg := fmt.Sprintf("Perfecto, en %s tenemos estos puntos disponibles:\n\n", cityName)
 		for i, name := range stores {
 			msg += fmt.Sprintf("%d. %s\n", i+1, name)
 		}
@@ -68,94 +105,188 @@ func HandlePickup(userInput string, currentState string, currentContext string) 
 		res.NextState = StatePickupAwaitingStore
 
 	case StatePickupAwaitingStore:
-		stores, err := api.GetPointSales()
-		if err != nil {
-			res.Message = "Error al consultar las tiendas."
-			return res
-		}
+		// Recuperar lista de tiendas del contexto
+		var stores []string
+		json.Unmarshal([]byte(context["stores_list"]), &stores)
 
-		var selectedStoreName string
 		var index int
 		_, errScan := fmt.Sscanf(userInput, "%d", &index)
-
 		if errScan == nil && index > 0 && index <= len(stores) {
-			selectedStoreName = stores[index-1]
+			context["store"] = stores[index-1] // ✅ Guardamos el NOMBRE, no el número
 		} else {
-			selectedStoreName = userInput
+			context["store"] = userInput
 		}
 
-		context["store"] = selectedStoreName
-
-		products, err := api.GetProducts()
-		if err != nil || len(products) == 0 {
-			res.Message = fmt.Sprintf("Punto seleccionado: %s.\n\nVe nuestro menú: https://menu.inoutdelivery.com/dlk\n\n¿Qué deseas ordenar?", selectedStoreName)
-		} else {
-			msg := fmt.Sprintf("Punto seleccionado: %s.\n\n📋 *Menú:*\n\n", selectedStoreName)
-			for i, p := range products {
-				if i >= 20 {
-					msg += fmt.Sprintf("...y %d productos más en: https://menu.inoutdelivery.com/dlk\n", len(products)-20)
-					break
-				}
-				msg += fmt.Sprintf("%d. %s\n", i+1, p.Name)
-			}
-			msg += "\n¿Qué productos deseas ordenar?"
-			res.Message = msg
+		// Cargar menú con precios
+		query := "SELECT name, price FROM gobot.products WHERE available = true LIMIT 20"
+		rows, err := db.DB.Query(query)
+		if err != nil {
+			res.Message = "Error al cargar el menú desde la base de datos."
+			return res
 		}
+		defer rows.Close()
+
+		var products []productInfo
+		msg := "📋 *Menú:*\n\n"
+		i := 1
+		for rows.Next() {
+			var p productInfo
+			rows.Scan(&p.Name, &p.Price)
+			products = append(products, p)
+			msg += fmt.Sprintf("%d. %s ($%.0f)\n", i, p.Name, p.Price)
+			i++
+		}
+
+		// Guardamos productos en contexto
+		productsJSON, _ := json.Marshal(products)
+		context["products_list"] = string(productsJSON)
+
+		msg += "\n¿Qué producto deseas ordenar? (Escribe el número)"
+		res.Message = msg
 		res.NextState = StatePickupAwaitingProduct
 
 	case StatePickupAwaitingProduct:
-		products, err := api.GetProducts()
-		if err != nil {
-			res.Message = "Error al obtener productos"
-			return res
-		}
+		var products []productInfo
+		json.Unmarshal([]byte(context["products_list"]), &products)
 
-		var selectedProductName string
 		var index int
 		_, errScan := fmt.Sscanf(userInput, "%d", &index)
-
 		if errScan == nil && index > 0 && index <= len(products) {
-			selectedProductName = products[index-1].Name
+			selected := products[index-1]
+			context["product_name"] = selected.Name
+			context["product_price"] = strconv.FormatFloat(selected.Price, 'f', 0, 64)
 		} else {
-			selectedProductName = userInput
+			context["product_name"] = userInput
+			context["product_price"] = "0"
 		}
-		context["products"] = selectedProductName
 
-		res.Message = fmt.Sprintf("¡Excelente elección con '%s'! 🍔\n\n¿Te gustaría agrandar tu combo...?", selectedProductName)
+		res.Message = "¡Excelente elección! 🍔\n\n¿Deseas añadir papas por $5.900 adicionales? (Sí/No)"
+		res.NextState = StatePickupAwaitingUpsell
+
+	case StatePickupAwaitingUpsell:
+		upsellPrice := 0.0
+		upsellText := ""
+
+		if strings.ToLower(strings.TrimSpace(userInput)) == "si" ||
+			strings.ToLower(strings.TrimSpace(userInput)) == "sí" {
+			upsellPrice = 5900
+			upsellText = "Papas ($5.900)"
+			context["upsell"] = "Papas"
+			context["upsell_price"] = "5900"
+		} else {
+			context["upsell"] = ""
+			context["upsell_price"] = "0"
+		}
+
+		// Calcular total
+		productPrice, _ := strconv.ParseFloat(context["product_price"], 64)
+		total := productPrice + upsellPrice
+
+		// Construir resumen
+		msg := fmt.Sprintf("📝 *Resumen de tu pedido:*\n\n"+
+			"📍 Tienda: %s\n"+
+			"🏙️ Ciudad: %s\n"+
+			"🛒 Producto: %s ($%.0f)\n",
+			context["store"],
+			context["city"],
+			context["product_name"],
+			productPrice,
+		)
+
+		if upsellText != "" {
+			msg += fmt.Sprintf("➕ Adicional: %s\n", upsellText)
+		}
+
+		msg += fmt.Sprintf("\n💰 *Total a pagar: $%.0f*\n\n¿Confirmas tu pedido? (Escribe CONFIRMAR)", total)
+		context["total"] = strconv.FormatFloat(total, 'f', 0, 64)
+
+		res.Message = msg
 		res.NextState = StatePickupConfirming
 
 	case StatePickupConfirming:
-		upsell := "Sin adicionales"
-		if userInput == "si" || userInput == "Si" || userInput == "SI" {
-			upsell = "Combo Agrandado"
-		}
-		res.Message = fmt.Sprintf("📝 *Resumen de tu pedido:*\n- Tienda: %s\n- Ciudad: %s\n- Productos: %s\n- Adicional: %s\n\nTotal estimado: $24.900\n\n¿Confirmas tu pedido para generar el link de pago? (Responde CONFIRMAR)",
-			context["store"], context["city"], context["products"], upsell)
-		res.NextState = "AWAITING_PAYMENT_LINK"
-
-	case "AWAITING_PAYMENT_LINK":
-		if strings.TrimSpace(strings.ToLower(userInput)) == "confirmar" {
-			var orderID string
-			err := db.DB.QueryRow(db.QueryInsertOrder,
-				"ed2a4366-a42e-4043-a1ee-0a72cf897683",
-				"",
-				context["store"],
-				context["city"],
-				context["products"],
-			).Scan(&orderID)
-
-			if err != nil {
-				fmt.Printf("[DEBUG] Error guardando pedido: %v\n", err)
-			} else {
-				fmt.Printf("[DEBUG] Pedido guardado con ID: %s\n", orderID)
-			}
-
-			res.Message = "✅ ¡Pedido confirmado! Aquí tienes tu link de pago seguro: https://pagos.inout.com/ref123\n\nTu pedido quedará con estado 'Pendiente de Pago' hasta que completes la transacción. ¡Gracias por elegirnos!"
-			res.NextState = "FINISHED"
-		} else {
-			res.Message = "Entendido, he cancelado el proceso. Si deseas empezar de nuevo, escribe 'menu principal'."
+		if strings.ToLower(strings.TrimSpace(userInput)) != "confirmar" {
+			res.Message = "Pedido cancelado. ¿En qué más te puedo ayudar?"
 			res.NextState = "IDLE"
+			res.NewContext = context
+			return res
 		}
+
+		// ✅ Guardar en base de datos
+		orderID := uuid.New().String()
+		total, _ := strconv.ParseFloat(context["total"], 64)
+		productPrice, _ := strconv.ParseFloat(context["product_price"], 64)
+		upsellPrice, _ := strconv.ParseFloat(context["upsell_price"], 64)
+
+		// Metadata con info de recogida
+		metadata := map[string]string{
+			"pickup_zone": context["store"],
+			"city":        context["city"],
+		}
+		metadataJSON, _ := json.Marshal(metadata)
+
+		// Insertar orden
+		tenantID := "ed2a4366-a42e-4043-a1ee-0a72cf897683"
+
+		_, err := db.DB.Exec(`
+    INSERT INTO gobot.orders 
+        (id, tenant_id, order_type, status, subtotal, delivery_fee, total, notes, metadata)
+    VALUES 
+        ($1, $2, 'pickup', 'pending', $3, 0, $4, $5, $6)`,
+			orderID,
+			tenantID,
+			productPrice,
+			total,
+			fmt.Sprintf("Recogida en: %s", context["store"]),
+			string(metadataJSON),
+		)
+		if err != nil {
+			res.Message = fmt.Sprintf("Error al guardar el pedido: %v", err)
+			return res
+		}
+
+		// Insertar producto principal en order_items
+		_, err = db.DB.Exec(`
+			INSERT INTO gobot.order_items 
+				(id, order_id, name, unit_price, quantity, subtotal)
+			VALUES 
+				($1, $2, $3, $4, 1, $4)`,
+			uuid.New().String(),
+			orderID,
+			context["product_name"],
+			productPrice,
+		)
+		if err != nil {
+			res.Message = fmt.Sprintf("Error al guardar el item: %v", err)
+			return res
+		}
+
+		// Insertar upsell si aplica
+		if context["upsell"] != "" && upsellPrice > 0 {
+			_, err = db.DB.Exec(`
+				INSERT INTO gobot.order_items 
+					(id, order_id, name, unit_price, quantity, subtotal)
+				VALUES 
+					($1, $2, $3, $4, 1, $4)`,
+				uuid.New().String(),
+				orderID,
+				context["upsell"],
+				upsellPrice,
+			)
+			if err != nil {
+				res.Message = fmt.Sprintf("Error al guardar el adicional: %v", err)
+				return res
+			}
+		}
+
+		res.Message = fmt.Sprintf(
+			"✅ *¡Pedido confirmado!*\n\n"+
+				"🆔 Pedido #%s\n"+
+				"💰 Total: $%s\n\n"+
+				"Pronto recibirás tu link de pago. ¡Gracias!",
+			orderID[:8],
+			context["total"],
+		)
+		res.NextState = "FINISHED"
 	}
 
 	res.NewContext = context
